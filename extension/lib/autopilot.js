@@ -28,6 +28,7 @@ import { prepareJob, tailoredEntry } from "./tailor.js";
 // (ctx.force) attempts it anyway and stops only at an actual sign-in page.
 const ACCOUNT_SITES = /myworkdayjobs\.com|workday\.com|icims\.com|taleo\.net|successfactors|oraclecloud\.com|brassring|amazon\.jobs|careers\.microsoft\.com|google\.com\/about\/careers|careers\.google\.com/i;
 import { sleep } from "./clock.js";
+import { signInFlow } from "./accounts.js";
 
 // A job that takes longer than this is stopped and left for you, so one
 // stuck site can't hold up the queue.
@@ -45,7 +46,8 @@ export async function runJob(job, ctx) {
   if (maxDays > 0 && !ctx.force && !isFresh(posted, maxDays)) {
     return { status: "stale", note: posted ? `Posted ${Math.floor((Date.now() / 1000 - posted) / 86400)} days ago; Autopilot only applies to jobs from the last ${maxDays} days.` : "No posting date, so it can't be confirmed as recent." };
   }
-  if (ACCOUNT_SITES.test(job.url) && !ctx.force) return { status: "manual", note: "This site usually needs an account. Try again to attempt it anyway, or open it and click Autofill on each page." };
+  // With sign-in turned on, account sites are attempted like any other.
+  if (ACCOUNT_SITES.test(job.url) && !ctx.force && !ctx.settings.accounts?.enabled) return { status: "manual", note: "This site usually needs an account. Try again to attempt it anyway, or open it and click Autofill on each page." };
 
   step("Opening");
   let tab = await openJobTab(job.url, ctx.slot);
@@ -66,10 +68,26 @@ export async function runJob(job, ctx) {
       size = await Page.waitForForm(tab);
     }
     tab = await chrome.tabs.get(tab.id);
-    if (size.controls < 3) {
-      const signIn = (await Page.callAll(tab, "signInWall").catch(() => [])).some(Boolean);
-      return { status: signIn ? "manual" : "needs-you", note: signIn ? "This site wants you to sign in first. Sign in in that tab, then Try again." : "Couldn't find the application form (unusual Apply button?).", tabId: tab.id };
+
+    // A sign-in wall instead of the form (or a sign-in form that looks like
+    // one): sign in / create an account if you turned that on, then go on.
+    const acct = (await Page.callAll(tab, "accountPage").catch(() => [])).find((p) => p.kind !== "none") || { kind: "none" };
+    const wall = acct.kind !== "none" || (size.controls < 3 && (await Page.callAll(tab, "signInWall").catch(() => [])).some(Boolean));
+    if (wall) {
+      const r = await signInFlow(tab, { settings: ctx.settings, profile: ctx.profile, job, step });
+      if (!r.ok) return { status: ctx.settings.accounts?.enabled ? "needs-you" : "manual", note: r.note, tabId: tab.id };
+      step(r.note || "Signed in");
+      tab = await chrome.tabs.get(tab.id);
+      size = await Page.waitForForm(tab);
+      // Many sites land back on the posting after signing in.
+      for (let i = 0; i < 2 && size.controls < 3; i++) {
+        if (!(await Page.callAll(tab, "clickApply")).find((c) => c.clicked)) break;
+        await sleep(600);
+        size = await Page.waitForForm(tab);
+      }
+      tab = await chrome.tabs.get(tab.id);
     }
+    if (size.controls < 3) return { status: "needs-you", note: "Couldn't find the application form (unusual Apply button?).", tabId: tab.id };
 
     if (!posting) posting = await Page.readJobPosting(tab).catch(() => ({ text: "" }));
 

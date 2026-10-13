@@ -784,10 +784,11 @@
 
   // Click the posting's "Apply" button to reveal or navigate to the form.
   function clickApply() {
-    const re = /^(apply|apply now|apply for this (job|position|role)|apply to this (job|position)|apply here|start application|i'?m interested)$/i;
+    const re = /^(apply manually|apply|apply now|apply for this (job|position|role)|apply to this (job|position)|apply here|start application|i'?m interested)$/i;
     const bad = /linkedin|indeed|google|glassdoor|with resume|saved/i;
     const cands = [...document.querySelectorAll('a, button, [role="button"], input[type="button"]')].filter((el) => visibleEl(el) && re.test(clickableText(el)) && !bad.test(clickableText(el)));
-    const el = cands[0];
+    // Workday asks how to apply: fill it ourselves rather than upload-and-parse.
+    const el = cands.find((c) => /apply manually/i.test(clickableText(c))) || cands[0];
     if (!el) return { clicked: false };
     const href = el.tagName === "A" ? el.href : null;
     el.click();
@@ -942,6 +943,127 @@
     return out;
   }
 
+  // ------------------------------------------------------------ accounts
+  // Sign-in, sign-up and verification-code pages on job sites, their "Sign in
+  // with Google" button, and Google's account picker / sharing screen.
+  // lib/accounts.js drives these, only for users who turned it on.
+
+  const vis = (sel) => [...document.querySelectorAll(sel)].filter((el) => visibleEl(el) && !el.disabled);
+  const passwordInputs = () => vis('input[type="password"]');
+  const emailInputs = () =>
+    vis('input[type="email"], input[autocomplete="email"], input[autocomplete="username"], input[data-automation-id="email"], input[name*="email" i], input[id*="email" i], input[name*="user" i], input[id*="user" i]').filter((el) => el.type !== "password" && el.type !== "hidden" && el.type !== "checkbox");
+  const codeInputs = () =>
+    vis('input[autocomplete="one-time-code"], input[name*="code" i], input[id*="code" i], input[name*="otp" i], input[id*="otp" i], input[aria-label*="code" i], input[placeholder*="code" i], input[data-automation-id*="code" i]').filter((el) => !/zip|postal|promo|country|area|discount/i.test(`${el.name} ${el.id} ${el.placeholder}`));
+  const GOOGLE_BTN = /^(sign in|log in|continue|sign up)( with google)$|^google$|^continue with google$|^sign in with google$/i;
+
+  // -> { kind: "code" | "signup" | "signin" | "check-email" | "none", google: bool, text }
+  // An application form with an email field (and maybe a "Continue with
+  // Google" autofill button) is not a sign-in page: without a password
+  // field, only nearly-empty pages count.
+  function accountPage() {
+    const text = clean((document.body.innerText || "").slice(0, 4000));
+    const small = controls().filter((el) => el.type !== "file").length < 4;
+    const google = small && !!findGoogleButton();
+    const pw = passwordInputs().length;
+    if (codeInputs().length && small && /code|verif|one[- ]time|passcode/i.test(text)) return { kind: "code", google, text: text.slice(0, 300) };
+    if (pw >= 2 || (pw === 1 && vis('[data-automation-id="verifyPassword"], input[name*="confirm" i], input[id*="confirm" i]').length)) return { kind: "signup", google: !!findGoogleButton(), text: text.slice(0, 300) };
+    if (pw === 1) return { kind: "signin", google: !!findGoogleButton(), text: text.slice(0, 300) };
+    if (!small) return { kind: "none", google: false, text: "" };
+    if (/verify your email|check your (email|inbox)|we('ve| have) sent (you )?(an? )?(email|link)|confirmation (email|link)/i.test(text)) return { kind: "check-email", google, text: text.slice(0, 300) };
+    if (/sign ?in|log ?in|create (an )?account/i.test(text) && (emailInputs().length || google)) return { kind: "signin", google, text: text.slice(0, 300) };
+    return { kind: "none", google: false, text: "" };
+  }
+
+  function findGoogleButton() {
+    return vis('a, button, [role="button"], div[tabindex]').find((b) => {
+      const t = clickableText(b) || b.getAttribute("aria-label") || b.title || "";
+      return GOOGLE_BTN.test(t.trim()) || (/google/i.test(t) && /sign|log|continue/i.test(t) && t.length < 40) || b.getAttribute("data-automation-id") === "SignInWithGoogleButton";
+    });
+  }
+
+  function clickGoogleSignIn() {
+    const b = findGoogleButton();
+    if (!b) return { clicked: false };
+    b.click();
+    return { clicked: true };
+  }
+
+  function clickMatching(re, extraSel = "") {
+    const btn = vis(`a, button, [role="button"], input[type="submit"], input[type="button"]${extraSel}`).find((b) => re.test(clickableText(b)) || re.test(b.getAttribute("data-automation-id") || ""));
+    if (!btn) return { clicked: false };
+    btn.click();
+    return { clicked: true, text: clickableText(btn) };
+  }
+
+  const clickCreateAccount = () => clickMatching(/^(create (an )?account|sign up|register|new user\??|createAccountLink)$|^don.?t have an account/i);
+  const clickSignIn = () => clickMatching(/^(sign ?in|log ?in|signInLink)$|^already have an account/i);
+
+  // allowTerms: tick required "I agree / privacy" boxes on a signup form.
+  function fillCredentials({ email, password, allowTerms = false }) {
+    let n = 0;
+    for (const el of emailInputs()) {
+      setNativeValue(el, email);
+      n++;
+    }
+    for (const el of passwordInputs()) {
+      setNativeValue(el, password);
+      n++;
+    }
+    if (allowTerms) {
+      for (const el of vis('input[type="checkbox"]')) {
+        const label = norm(`${optionLabel(el)} ${labelFor(el)} ${el.getAttribute("data-automation-id") || ""}`);
+        if (!el.checked && /agree|accept|terms|privacy|consent|acknowledge|createaccountcheckbox/.test(label) && !/marketing|newsletter|sms|text message|promotional|job alert/.test(label)) {
+          el.click();
+          if (!el.checked) {
+            el.checked = true;
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        }
+      }
+    }
+    return n;
+  }
+
+  const submitAccount = () =>
+    clickMatching(/^(create account|create my account|sign up|register|sign ?in|log ?in|continue|next|submit|verify|confirm|createAccountSubmitButton|signInSubmitButton)$/i, ', [data-automation-id="createAccountSubmitButton"], [data-automation-id="signInSubmitButton"]');
+
+  function fillCode(code) {
+    const boxes = codeInputs();
+    if (!boxes.length) return false;
+    // One box per character on some sites, one box for the whole code on most.
+    if (boxes.length >= code.length && boxes.every((b) => Number(b.maxLength) === 1)) code.split("").forEach((ch, i) => setNativeValue(boxes[i], ch));
+    else setNativeValue(boxes[0], code);
+    return true;
+  }
+
+  // Google's own pages (accounts.google.com), after a site's "Sign in with
+  // Google". Picks your account and continues past the sharing screen only
+  // when the site asks for basic profile info. Never types a password.
+  // -> { state: "picked" | "continued" | "password" | "verify" | "scopes" | "other", detail }
+  function googleStep({ email }) {
+    if (!/(^|\.)accounts\.google\.com$/.test(location.hostname)) return { state: "other", detail: location.hostname };
+    const text = clean((document.body.innerText || "").slice(0, 6000));
+    if (passwordInputs().length) return { state: "password", detail: "Google wants your password" };
+    if (/verify it.?s you|2-step|two-step|confirm it.?s you|enter the code|check your phone/i.test(text)) return { state: "verify", detail: "Google wants to verify it's you" };
+    // Account picker: each account is marked with data-identifier / data-email.
+    const accounts = vis("[data-identifier], [data-email]");
+    if (accounts.length) {
+      const mine = accounts.find((a) => (a.getAttribute("data-identifier") || a.getAttribute("data-email") || "").toLowerCase() === String(email || "").toLowerCase());
+      const pick = mine || (accounts.length === 1 ? accounts[0] : null);
+      if (!pick) return { state: "other", detail: `None of the Google accounts here is ${email}` };
+      pick.click();
+      return { state: "picked", detail: pick.getAttribute("data-identifier") || pick.getAttribute("data-email") };
+    }
+    // Sharing screen: continue only for basic profile (name, email, picture).
+    const btn = vis('button, [role="button"]').find((b) => /^(continue|allow|confirm|next)$/i.test(clickableText(b)));
+    if (btn) {
+      if (/(see|edit|create|delete|manage|download).{0,40}(drive|gmail|email messages|contacts|calendar|photos|youtube|documents|files)|google drive|your contacts|your calendar/i.test(text)) return { state: "scopes", detail: "The site asks for more than your basic profile" };
+      btn.click();
+      return { state: "continued", detail: clickableText(btn) };
+    }
+    return { state: "other", detail: text.slice(0, 120) };
+  }
+
   // A sign-in page instead of an application form.
   function signInWall() {
     const pw = [...document.querySelectorAll('input[type="password"]')].some(visibleEl);
@@ -994,6 +1116,14 @@
     invalidFields,
     snapshotFields,
     signInWall,
+    accountPage,
+    clickGoogleSignIn,
+    clickCreateAccount,
+    clickSignIn,
+    fillCredentials,
+    submitAccount,
+    fillCode,
+    googleStep,
     _labelFor: labelFor,
     _classify: classify,
   };

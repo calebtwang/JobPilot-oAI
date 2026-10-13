@@ -97,6 +97,7 @@ export async function getSettings() {
   s.filters = { ...DEFAULT_FILTERS, ...s.filters };
   s.autopilot = { ...DEFAULT_AUTOPILOT, ...s.autopilot };
   s.target = { ...DEFAULT_TARGET, ...s.target };
+  s.accounts = { ...DEFAULT_SETTINGS.accounts, ...s.accounts };
   // The job list used to default to 30 days; move that old default to 7 once.
   if (!s.ageDefault7) {
     if (s.filters.maxAgeDays === 30) s.filters.maxAgeDays = 7;

@@ -92,6 +92,8 @@ JobPilot checks this repo for new commits every few hours and puts a **↑** bad
 
 One-click updates need a `git clone` and the Claude Code bridge installed from inside it (`node bridge/install.js`). The bridge runs `git pull --ff-only` in that folder, refreshes its own copy, and the extension reloads. Without the bridge, or with a ZIP download, JobPilot just tells you a newer version is out: run `git pull` (or re-download), then click reload on JobPilot in `chrome://extensions`.
 
+If the folder Chrome loads JobPilot from already has newer files (you ran `git pull`, or edited the clone), JobPilot notices within a minute and restarts into them by itself when the panel and Autopilot aren't open; otherwise it shows *Restart now*.
+
 Updates never touch your data. Your resume, profile and settings live in the browser, not in the repo folder.
 
 ## Autopilot (auto-apply)

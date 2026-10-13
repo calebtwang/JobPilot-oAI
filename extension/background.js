@@ -4,10 +4,27 @@
 import { getSettings, getProfile, get, set } from "./lib/store.js";
 import { refreshJobs, jobKeyForUrl } from "./lib/jobs.js";
 import { matchesFilters } from "./lib/sources.js";
-import { checkForUpdate, applyUpdate } from "./lib/update.js";
+import { checkForUpdate, applyUpdate, diskVersion, restartPending } from "./lib/update.js";
 
 const ALARM = "refresh-jobs";
 const UPDATE_ALARM = "update-check";
+const DISK_ALARM = "disk-version";
+
+// New files on disk (git pull, or the clone itself changed)? Restart into
+// them by ourselves when nothing of JobPilot is open or running, so you're
+// never stuck on old code. Otherwise the panel shows "Restart to update".
+async function restartIfUpdated() {
+  const settings = await getSettings();
+  if (settings.autoUpdate === "off" || !restartPending(await diskVersion())) return;
+  const queue = await get("autopilotQueue", []);
+  if (queue.some((i) => i.status === "running")) return;
+  const open = chrome.runtime.getContexts ? await chrome.runtime.getContexts({ contextTypes: ["SIDE_PANEL", "TAB", "POPUP"] }) : [];
+  if (open.length) {
+    await checkForUpdate(settings).catch(() => {}); // badge + banner
+    return;
+  }
+  chrome.runtime.reload();
+}
 
 async function schedule() {
   const s = await getSettings();
@@ -49,16 +66,21 @@ async function updateOnStartup() {
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
   chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: 360 });
+  chrome.alarms.create(DISK_ALARM, { periodInMinutes: 1 });
+  set("updateStatus", null); // just updated: clear the old notice
+  chrome.action.setBadgeText({ text: "" });
   schedule();
 });
 chrome.runtime.onStartup.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
   chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: 360 });
+  chrome.alarms.create(DISK_ALARM, { periodInMinutes: 1 });
   schedule();
   updateOnStartup();
 });
 chrome.alarms.onAlarm.addListener(async (a) => {
   if (a.name === ALARM) refreshAndNotify().catch((e) => console.warn("JobPilot refresh failed", e));
+  if (a.name === DISK_ALARM) restartIfUpdated().catch(() => {});
   // Later update checks only show a badge; the user picks when to update.
   if (a.name === UPDATE_ALARM) {
     const settings = await getSettings();
