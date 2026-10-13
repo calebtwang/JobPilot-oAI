@@ -191,7 +191,7 @@ test('subscription inference uses streaming, strict JSON and PDF input without A
     assert.equal(body.model, 'account-model');
     assert.equal(body.text.format.strict, true);
     assert.equal(body.input[0].content[0].file_data, 'data:application/pdf;base64,cGRm');
-    return stream([{ type: 'response.output_text.delta', delta: '{partial' }, { type: 'response.completed', response: completed({ ok: 'OK' }) }]);
+    return stream([{ type: 'response.output_text.delta', delta: '{partial', output_index: 0, content_index: 0 }, { type: 'response.completed', response: completed({ ok: 'OK' }) }]);
   }); seed(svc);
   const result = await svc.run('a', 'account-model', { system: 'Return JSON', content: [{ type: 'document', source: { media_type: 'application/pdf', data: 'cGRm' } }], schema: { type: 'object' } });
   assert.deepEqual(result, { ok: 'OK' });
@@ -199,7 +199,7 @@ test('subscription inference uses streaming, strict JSON and PDF input without A
 
 test('stream reader handles arbitrary CRLF/UTF-8 boundaries and rejects incomplete/disconnected streams', async () => {
   assert.deepEqual(await readResponseStream(stream([{ type: 'response.completed', response: completed({ text: 'café 🎉' }) }], 1)), completed({ text: 'café 🎉' }));
-  await assert.rejects(readResponseStream(stream([{ type: 'response.output_text.delta', delta: '{}' }])), /disconnected/);
+  await assert.rejects(readResponseStream(stream([{ type: 'response.output_text.delta', delta: '{}', output_index: 0, content_index: 0 }])), /disconnected/);
   await assert.rejects(readResponseStream(stream([{ type: 'response.incomplete', response: {} }])), /incomplete/);
   await assert.rejects(readResponseStream(stream([{ type: 'response.failed', response: { error: { code: 'subscription_sharing_usage_limit_exceeded' } } }])), /usage limit/);
 });
@@ -241,7 +241,7 @@ test('installer packages subscription bridge and shared adapter in isolated brow
   const frame = Buffer.from(JSON.stringify({ type: 'chatgpt-status' })); const length = Buffer.alloc(4); length.writeUInt32LE(frame.length);
   const host = spawnSync(process.execPath, ['-e', `require('node:os').homedir = () => ${JSON.stringify(dir)}; require(${JSON.stringify(path.join(install, 'host.js'))});`], { input: Buffer.concat([length, frame]) });
   assert.equal(host.status, 0, host.stderr.toString());
-  const reply = JSON.parse(host.stdout.subarray(4)); assert.equal(reply.ok, true); assert.equal(reply.bridgeVersion, '1.4.0');
+  const reply = JSON.parse(host.stdout.subarray(4)); assert.equal(reply.ok, true); assert.equal(reply.bridgeVersion, '1.4.1');
   assert.doesNotMatch(JSON.stringify(reply), /access_token|refresh_token|id_token/);
 });
 
@@ -258,4 +258,48 @@ test('sign-in times out and closes its loopback listener', async () => {
   let callback;
   await assert.rejects(f.svc.signIn(undefined, async (url) => { callback = new URL(url).searchParams.get('redirect_uri'); }), /timed out/);
   await assert.rejects(nativeFetch(callback));
+});
+
+test('GPT-6.1 Sol subscription stream retains JSON when terminal output is empty', async () => {
+  const item = { id: 'msg_test', type: 'message', role: 'assistant', phase: 'final_answer', status: 'completed', content: [{ type: 'output_text', text: '{"ok":"OK"}' }] };
+  const events = [
+    { type: 'response.output_item.added', output_index: 0, item: { ...item, status: 'in_progress', content: [] } },
+    { type: 'response.content_part.added', output_index: 0, content_index: 0, part: { type: 'output_text', text: '' } },
+    { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: '{"ok":' },
+    { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: '"OK"}' },
+    { type: 'response.output_text.done', output_index: 0, content_index: 0, text: '{"ok":"OK"}' },
+    { type: 'response.content_part.done', output_index: 0, content_index: 0, part: item.content[0] },
+    { type: 'response.output_item.done', output_index: 0, item },
+    { type: 'response.completed', response: { status: 'completed', output: [] } },
+  ];
+  const svc = service(async () => stream(events, 1)); seed(svc);
+  assert.deepEqual(await svc.run('a', 'gpt-6.1-sol', { system: 'Return JSON', content: 'Return OK', schema: {} }), { ok: 'OK' });
+});
+
+test('streamed commentary is separate from the final JSON, including in an empty terminal snapshot', async () => {
+  const events = [
+    { type: 'response.output_item.done', output_index: 0, item: { type: 'message', phase: 'commentary', content: [{ type: 'output_text', text: 'I will parse your resume.' }] } },
+    { type: 'response.output_item.done', output_index: 1, item: { type: 'message', phase: 'final_answer', content: [{ type: 'output_text', text: '{"ok":"OK"}' }] } },
+    { type: 'response.completed', response: { status: 'completed', output: [] } },
+  ];
+  const svc = service(async () => stream(events)); seed(svc);
+  assert.deepEqual(await svc.run('a', 'gpt-6.1-sol', { system: '', content: 'OK', schema: {} }), { ok: 'OK' });
+});
+
+test('output_text.done alone supplies the final text without duplicating streamed deltas', async () => {
+  const output = await readResponseStream(stream([
+    { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: '{"ok":' },
+    { type: 'response.output_text.done', output_index: 0, content_index: 0, text: '{"ok":"OK"}' },
+    { type: 'response.completed', response: { status: 'completed', output: [] } },
+  ]));
+  assert.equal(output.output[0].content[0].text, '{"ok":"OK"}');
+});
+
+test('completed streams still detect refusals from earlier events', async () => {
+  const svc = service(async () => stream([
+    { type: 'response.refusal.delta', output_index: 0, content_index: 0, delta: 'Declined' },
+    { type: 'response.refusal.done', output_index: 0, content_index: 0, refusal: 'Declined' },
+    { type: 'response.completed', response: { status: 'completed', output: [] } },
+  ])); seed(svc);
+  await assert.rejects(svc.run('a', 'gpt-6.1-sol', { system: '', content: 'OK', schema: {} }), /declined/);
 });

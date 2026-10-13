@@ -50,7 +50,20 @@ async function verifyIdentity(jwt, clientId, nonce, metadata, jwks, now = Date.n
 async function readResponseStream(response) {
   if (!response.body) throw fail('OpenAI returned an empty response stream.', 'CHATGPT_RESPONSE');
   let buffer = '', completed;
+  const items = new Map();
   const decoder = new TextDecoder();
+  function itemFor(event) {
+    if (!Number.isInteger(event.output_index) || event.output_index < 0 || event.output_index > 4096) throw fail('Invalid ChatGPT stream output index.', 'CHATGPT_RESPONSE');
+    if (!items.has(event.output_index)) items.set(event.output_index, { id: event.item_id, type: 'message', role: 'assistant', content: [] });
+    return items.get(event.output_index);
+  }
+  function partFor(event, type) {
+    const item = itemFor(event);
+    if (!Number.isInteger(event.content_index) || event.content_index < 0 || event.content_index > 4096) throw fail('Invalid ChatGPT stream content index.', 'CHATGPT_RESPONSE');
+    item.content ||= [];
+    item.content[event.content_index] ||= { type, [type === 'refusal' ? 'refusal' : 'text']: '' };
+    return item.content[event.content_index];
+  }
   function consume(block) {
     const payload = block.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n');
     if (!payload || payload === '[DONE]') return;
@@ -58,7 +71,29 @@ async function readResponseStream(response) {
     try { event = JSON.parse(payload); } catch { throw fail('OpenAI returned malformed streaming data.', 'CHATGPT_RESPONSE'); }
     if (event.type === 'error' || event.type === 'response.failed') throw inferenceError(0, event.response || event);
     if (event.type === 'response.incomplete') throw fail('The ChatGPT response was incomplete. Try again.', 'CHATGPT_RESPONSE');
-    if (event.type === 'response.completed') completed = event.response;
+    if (event.type === 'response.output_item.added' || event.type === 'response.output_item.done') {
+      itemFor(event);
+      items.set(event.output_index, event.item);
+    } else if (event.type === 'response.content_part.added' || event.type === 'response.content_part.done') {
+      partFor(event, event.part.type);
+      items.get(event.output_index).content[event.content_index] = event.part;
+    } else if (event.type === 'response.output_text.delta' || event.type === 'response.output_text.done') {
+      const part = partFor(event, 'output_text');
+      part.text = event.type.endsWith('.done') ? event.text : part.text + event.delta;
+    } else if (event.type === 'response.refusal.delta' || event.type === 'response.refusal.done') {
+      const part = partFor(event, 'refusal');
+      part.refusal = event.type.endsWith('.done') ? event.refusal : part.refusal + event.delta;
+    } else if (event.type === 'response.completed') {
+      // The subscription route may omit output from the terminal snapshot.
+      // Preserve finalized stream items; never concatenate deltas with done text.
+      const streamed = [...items.entries()].sort(([a], [b]) => a - b).map(([, item]) => item);
+      const snapshot = event.response?.output;
+      const output = snapshot?.length ? snapshot.map((item, index) => {
+        const saved = streamed.find((part) => part.id && part.id === item.id) || items.get(index);
+        return item.type === 'message' && !item.content?.length && saved?.type === 'message' ? { ...saved, ...item, content: saved.content } : item;
+      }) : streamed;
+      completed = { ...event.response, output };
+    }
   }
   const reader = response.body.getReader();
   try {

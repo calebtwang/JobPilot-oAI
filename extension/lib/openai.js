@@ -72,16 +72,27 @@ export async function callOpenAI(settings, opts) {
 }
 
 export function parseOpenAIResponse(data) {
-  const output = (data.output || []).filter((item) => item.type === "message").flatMap((item) => item.content || []);
+  const messages = (data.output || []).filter((item) => item.type === "message" && (!item.role || item.role === "assistant"));
+  const output = messages.flatMap((item) => item.content || []);
   if (output.some((part) => part.type === "refusal")) throw new Error("The model declined this request. Try rephrasing or a different model.");
   if (data.status === "incomplete") throw new Error("The OpenAI response was incomplete. Try again or select another model.");
   if (data.status !== "completed") throw new Error("OpenAI didn't complete the request. Try again.");
-  const text = output.filter((part) => part.type === "output_text").map((part) => part.text).join("");
+  // Intermediate commentary is a separate message, not part of the JSON answer.
+  const answer = messages.filter((item) => item.phase === "final_answer").at(-1)
+    || messages.filter((item) => item.phase !== "commentary").at(-1);
+  const text = (answer?.content || []).filter((part) => part.type === "output_text").map((part) => part.text).join("");
+  if (!text.trim()) {
+    const error = new Error("OpenAI completed the request without an answer. Update the JobPilot bridge and try again.");
+    error.code = "OPENAI_EMPTY_OUTPUT";
+    throw error;
+  }
   try {
     const result = JSON.parse(text);
     if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error();
     return result;
   } catch {
-    throw new Error("The AI returned malformed data. Try again.");
+    const error = new Error("OpenAI returned an answer that isn't a JSON object. Try again or select another model.");
+    error.code = "OPENAI_INVALID_JSON";
+    throw error;
   }
 }

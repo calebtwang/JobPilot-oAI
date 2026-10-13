@@ -105,7 +105,7 @@ test('refusals, incomplete output, malformed data and network errors are not cac
     [{ status: 'completed', output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'No' }] }] }, /declined/],
     [{ status: 'incomplete', output: [] }, /incomplete/],
     [{ status: 'failed', output: [] }, /complete/],
-    [{ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: '{bad' }] }] }, /malformed/],
+    [{ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: '{bad' }] }] }, /JSON object/],
   ]) {
     globalThis.fetch = async () => response(data);
     await assert.rejects(parseResume(settings, 'error-pdf'), expected);
@@ -193,4 +193,23 @@ test('ChatGPT usage limits stop new Autopilot jobs and do not invoke API billing
   await assert.rejects(testConnection({ provider: 'chatgpt', chatgptAccountId: 'a', chatgptModel: 'model' }), /Manage usage/);
   assert.equal(storage.autopilotStop, true);
   assert.equal(calls.length, 0);
+});
+
+test('OpenAI parses the final answer separately from commentary and earlier messages', async () => {
+  const { parseOpenAIResponse } = await import('../extension/lib/openai.js');
+  assert.deepEqual(parseOpenAIResponse({ status: 'completed', output: [
+    { type: 'message', phase: 'commentary', content: [{ type: 'output_text', text: 'Working on it.' }] },
+    { type: 'message', phase: 'final_answer', content: [{ type: 'output_text', text: '{"ok":"OK"}' }] },
+  ] }), { ok: 'OK' });
+  assert.deepEqual(parseOpenAIResponse({ status: 'completed', output: [
+    { type: 'message', content: [{ type: 'output_text', text: 'Working on it.' }] },
+    { type: 'message', content: [{ type: 'output_text', text: '{"ok":"OK"}' }] },
+  ] }), { ok: 'OK' });
+});
+
+test('empty OpenAI output is diagnosed separately from invalid JSON without exposing response text', async () => {
+  const { parseOpenAIResponse } = await import('../extension/lib/openai.js');
+  assert.throws(() => parseOpenAIResponse({ status: 'completed', output: [] }), { code: 'OPENAI_EMPTY_OUTPUT' });
+  assert.throws(() => parseOpenAIResponse(completed('private non-JSON answer')), { code: 'OPENAI_INVALID_JSON' });
+  try { parseOpenAIResponse(completed('private non-JSON answer')); } catch (e) { assert.doesNotMatch(e.message, /private/); }
 });

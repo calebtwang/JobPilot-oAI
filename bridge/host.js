@@ -19,7 +19,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const BRIDGE_VERSION = "1.4.0";
+const BRIDGE_VERSION = "1.4.1";
 const { ChatGPT } = require("./chatgpt.js");
 const chatgpt = new ChatGPT();
 const TIMEOUT_MS = 5 * 60 * 1000;
