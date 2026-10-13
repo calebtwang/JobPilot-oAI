@@ -14,11 +14,13 @@ export const DEFAULT_AUTOPILOT = {
 };
 
 export const DEFAULT_SETTINGS = {
-  provider: "claude-code", // "claude-code" (subscription via bridge) | "api"
+  provider: "claude-code", // "claude-code" (subscription via bridge) | "api" (Anthropic) | "openai"
   ccModel: "sonnet",
   aiVerified: false,
   apiKey: "",
   model: "claude-sonnet-5-5",
+  openaiApiKey: "",
+  openaiModel: "gpt-5-mini",
   fileNamePattern: "{First}_{Last}_Resume_{Company}",
   renderer: "latex", // "latex" (via bridge when TeX is installed) | "built-in"
   attachWhenUntailored: "generated", // "generated" | "original"
@@ -30,7 +32,7 @@ export const DEFAULT_SETTINGS = {
   updateBranch: "main",
   autoUpdate: "ask", // "auto" | "ask" | "off"
   target: DEFAULT_TARGET, // what jobs to look for, read from your resume (fit.js)
-  instructions: "", // standing instructions for Claude, one per line (Settings → Instructions for Claude)
+  instructions: "", // standing instructions for AI, one per line (Settings → Instructions for AI)
   coverAttach: "any", // attach your cover letter to "any" cover letter field | "required" ones only | "off"
 };
 

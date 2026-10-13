@@ -113,7 +113,7 @@ async function withBusy(name, fn, rerender = renderApply) {
 const spinner = () => h("span", { class: "spinner" });
 
 // AI is usable via an API key or the Claude Code bridge.
-const aiReady = () => S.settings.provider === "claude-code" || !!S.settings.apiKey;
+const aiReady = () => AI.isConfigured(S.settings);
 
 function hasContent(r) {
   return !!(r && (r.basics?.name || r.sections?.length));
@@ -307,7 +307,7 @@ function renderApply() {
   const hasResume = hasContent(S.base) || !!S.resumePdf;
   const hasProfile = !!(S.profile.email && S.profile.firstName);
 
-  const aiOk = S.settings.aiVerified || (S.settings.provider === "api" && !!S.settings.apiKey);
+  const aiOk = S.settings.aiVerified || (S.settings.provider !== "claude-code" && aiReady());
   if (!aiOk || !hasResume || !hasProfile) {
     const item = (done, text, action, tab) =>
       h(
@@ -322,7 +322,7 @@ function renderApply() {
         "div",
         { class: "card" },
         h("h3", {}, "Get set up (2 minutes)"),
-        item(aiOk, "Connect Claude", "Connect", "settings"),
+        item(aiOk, "Connect AI", "Connect", "settings"),
         item(hasResume, "Upload your resume", "Upload", "resume"),
         item(hasProfile, "Check your application profile", "Open", "settings")
       )
@@ -494,9 +494,9 @@ function tailorCard(hasKey) {
   }
 
   card.append(
-    h("p", { class: "muted small" }, "Claude reads this posting and rewords and reorders your existing bullets and skills to match its keywords. You review every change first, and it never makes up experience."),
+    h("p", { class: "muted small" }, "AI reads this posting and rewords and reorders your existing bullets and skills to match its keywords. You review every change first, and it never makes up experience."),
     h("button", { class: "btn primary block", onclick: startTailor, disabled: !hasKey || !hasContent(S.base) }, "Tailor my resume to this job"),
-    !hasKey ? h("div", { class: "small muted", style: { marginTop: "6px" } }, "Connect Claude in Settings to enable tailoring.") : !hasContent(S.base) ? h("div", { class: "small muted", style: { marginTop: "6px" } }, "Upload your resume (Resume tab) first.") : null
+    !hasKey ? h("div", { class: "small muted", style: { marginTop: "6px" } }, "Connect AI in Settings to enable tailoring.") : !hasContent(S.base) ? h("div", { class: "small muted", style: { marginTop: "6px" } }, "Upload your resume (Resume tab) first.") : null
   );
   return card;
 }
@@ -544,7 +544,7 @@ function fillCard(hasResume) {
   const card = h("div", { class: "card" }, h("h3", {}, h("span", { class: "step" }, "2"), "Fill the application"));
   const file = hasResume ? { name: resumeNameForJob() } : null;
   card.append(
-    h("p", { class: "muted small" }, "Fills in your name, contact details, school, links and standard questions, and attaches ", file ? h("strong", {}, file.name) : "your resume", ". If it gets stuck on a field, Claude picks the matching option from your profile; anything that needs your own words is left for you. Already-filled fields are left alone."),
+    h("p", { class: "muted small" }, "Fills in your name, contact details, school, links and standard questions, and attaches ", file ? h("strong", {}, file.name) : "your resume", ". If it gets stuck on a field, AI picks the matching option from your profile; anything that needs your own words is left for you. Already-filled fields are left alone."),
     h("button", { class: "btn primary block", onclick: doAutofill, disabled: S.busy.fill }, S.busy.fill ? [spinner(), " Filling…"] : "Autofill this page")
   );
   const r = S.report;
@@ -558,7 +558,7 @@ function fillCard(hasResume) {
       );
     if (r.filled.length) summary.push(h("details", { style: { marginTop: "6px" } }, h("summary", { class: "small" }, "What was filled (green on the page)"), h("ul", { class: "report-list" }, r.filled.map((x) => h("li", {}, h("strong", {}, x.label), ": ", x.value)))));
     card.append(...summary);
-    // Tell Claude what's wrong on the page; it changes only those fields.
+    // Tell AI what's wrong on the page; it changes only those fields.
     const fx = S.fixResult;
     if (fx) {
       card.append(
@@ -577,7 +577,7 @@ function fillCard(hasResume) {
         { style: { marginTop: "8px" } },
         feedbackBox({
           key: `fill:${S.job.key}`,
-          button: "Something's wrong? Tell Claude",
+          button: "Something's wrong? Tell AI",
           placeholder: "e.g. Start date should be August 2026, and pick Summer 2027 Internship instead of Both.",
           rerender: renderApply,
           run: async (text) => {
@@ -600,17 +600,17 @@ async function doAutofill() {
     const profile = profileForJob();
     const coverFile = await coverFileForJob().catch(() => null);
     const report = await Page.autofill(S.tab, { profile, resumeFile: file, coverFile, coverOnlyIfRequired: S.settings.coverAttach === "required" });
-    // Then one short Claude pass for whatever the rules couldn't fill.
+    // Then one short AI pass for whatever the rules couldn't fill.
     if (aiReady() && report.controls) {
       try {
         const posting = S.posting[S.job?.key]?.text || "";
         const r = await resolveStuck(S.tab, { settings: S.settings, profile, resumeText: resumeToText(currentTailored()?.resume || S.base), posting, instructions: S.settings.instructions || "" });
         const done = new Set([...r.filled, ...r.drafted].map((x) => x.label));
         report.review = report.review.filter((x) => !done.has(x.label));
-        report.filled.push(...r.filled.map((x) => ({ ...x, value: `${x.value} (matched by Claude)` })), ...r.drafted.map((x) => ({ ...x, value: `${x.value} (Claude's pick, purple)` })));
+        report.filled.push(...r.filled.map((x) => ({ ...x, value: `${x.value} (matched by AI)` })), ...r.drafted.map((x) => ({ ...x, value: `${x.value} (AI's pick, purple)` })));
         for (const x of r.skipped) if (!report.review.some((y) => y.label === x.label)) report.review.push(x);
       } catch (e) {
-        report.review.push({ label: "Claude", reason: `Couldn't finish the stuck fields: ${e.message}` });
+        report.review.push({ label: "AI", reason: `Couldn't finish the stuck fields: ${e.message}` });
       }
     }
     S.report = report;
@@ -621,7 +621,7 @@ async function doAutofill() {
 function questionsCard(hasKey) {
   const card = h("div", { class: "card" }, h("h3", {}, h("span", { class: "step" }, "3"), "Answer the real questions"));
   card.append(
-    h("p", { class: "muted small" }, "Claude drafts answers to the remaining questions (\"Why this company?\", dropdowns, and so on) from your resume and this posting. Drafts show up purple on the page. Read and edit them before you submit."),
+    h("p", { class: "muted small" }, "AI drafts answers to the remaining questions (\"Why this company?\", dropdowns, and so on) from your resume and this posting. Drafts show up purple on the page. Read and edit them before you submit."),
     h("button", { class: "btn block", onclick: doDraftAnswers, disabled: !hasKey || S.busy.answers }, S.busy.answers ? [spinner(), " Drafting answers…"] : "Draft answers to open questions")
   );
   if (S.answers) {
@@ -906,7 +906,7 @@ function renderJobs() {
 
 // --------------------------------------------- what jobs to look for
 
-// One Claude call: your resume -> the kinds of roles that fit (fit.js).
+// One AI call: your resume -> the kinds of roles that fit (fit.js).
 async function buildTargetFromResume({ quiet = false } = {}) {
   if (!aiReady() || !hasContent(S.base)) return;
   const t = await AI.buildTarget(S.settings, { resumeText: resumeToText(S.base), profile: S.profile });
@@ -1121,7 +1121,7 @@ function autopilotCard() {
       "p",
       { class: "small muted" },
       `Prepares ${ap.concurrency} applications at a time in background tabs: tailored resume, filled form, answers. `,
-      ap.autoSubmit ? "Submits when every answer came from your profile or your own saved answers. Claude only fills forms (options, formats, matching your answers); it never writes answers here, so questions that need your words wait for you." : "Auto-submit is off: every application waits for you to submit."
+      ap.autoSubmit ? "Submits when every answer came from your profile or your own saved answers. AI only fills forms (options, formats, matching your answers); it never writes answers here, so questions that need your words wait for you." : "Auto-submit is off: every application waits for you to submit."
     )
   );
 
@@ -1274,7 +1274,7 @@ function queueRow(it) {
 }
 
 // Feedback on an Autopilot job: fix its open tab now, or re-run it with
-// your note (Claude also applies the note after filling).
+// your note (AI also applies the note after filling).
 function queueFeedback(it) {
   const hasTab = it.tabId && ["review", "needs-you"].includes(it.status);
   if (!hasTab && !["failed", "needs-you", "manual"].includes(it.status)) return null;
@@ -1337,7 +1337,7 @@ async function startAutopilot(n) {
       const pdf = await buildResumePdf(t?.resume || S.base, S.settings);
       return { name, base64: pdf.base64 };
     },
-    // Autopilot letters are only your own paragraphs (no Claude sentence).
+    // Autopilot letters are only your own paragraphs (no AI sentence).
     cover: S.cover,
     bank: S.bank,
     coverFileFor: async (job, t) => {
@@ -1437,7 +1437,7 @@ async function handleUpload(file) {
   S.resumePdf = { name: file.name, base64 };
   await store.set("resumePdf", S.resumePdf);
   if (!aiReady()) {
-    toast("Saved your PDF. Connect Claude in Settings to turn it into editable boxes.");
+    toast("Saved your PDF. Connect AI in Settings to turn it into editable boxes.");
     renderResumeTab();
     return;
   }
@@ -1486,8 +1486,8 @@ function renderResumeTab() {
       },
     },
     S.busy.parse
-      ? [spinner(), " Reading your resume with Claude… (15–40s)"]
-      : [h("strong", {}, S.resumePdf ? "Upload a new resume PDF" : "Upload your resume (PDF)"), h("div", { class: "small muted" }, "Click or drop a file here. Claude turns it into editable boxes.")],
+      ? [spinner(), " Reading your resume with AI… (15–40s)"]
+      : [h("strong", {}, S.resumePdf ? "Upload a new resume PDF" : "Upload your resume (PDF)"), h("div", { class: "small muted" }, "Click or drop a file here. AI turns it into editable boxes.")],
     fileInput
   );
   const uploadCard = h("div", { class: "card" }, drop);
@@ -1498,7 +1498,7 @@ function renderResumeTab() {
         { class: "row small", style: { marginTop: "8px" } },
         h("span", { class: "muted" }, `Uploaded: ${S.resumePdf.name}`),
         h("span", { class: "spacer" }),
-        aiReady() && !S.busy.parse && h("button", { class: "btn ghost", onclick: parseUploaded }, hasContent(S.base) ? "Re-parse" : "Parse with Claude")
+        aiReady() && !S.busy.parse && h("button", { class: "btn ghost", onclick: parseUploaded }, hasContent(S.base) ? "Re-parse" : "Parse with AI")
       )
     );
   }
@@ -1947,7 +1947,7 @@ function coverCard() {
     h(
       "p",
       { class: "small muted" },
-      "Write it once, in your own words. For each job, JobPilot keeps your opening, \"why\" and closing, picks the experience paragraphs that best match the posting, and fills in {Company} and {Role}. Hiring managers mark down generic or AI-sounding letters, so Claude only adds one sentence about the posting where you put {Hook}, and lightly rewords your paragraphs toward its terms. You approve both, and Autopilot leaves them out."
+      "Write it once, in your own words. For each job, JobPilot keeps your opening, \"why\" and closing, picks the experience paragraphs that best match the posting, and fills in {Company} and {Role}. Hiring managers mark down generic or AI-sounding letters, so AI only adds one sentence about the posting where you put {Hook}, and lightly rewords your paragraphs toward its terms. You approve both, and Autopilot leaves them out."
     ),
     h(
       "ul",
@@ -1975,16 +1975,16 @@ function coverCard() {
       )
     ),
     field("why", "Why this company", "What draws me to {Company}: {Hook} Then a sentence or two of your own on why this kind of work matters to you."),
-    line("hookFallback", "If Claude has nothing specific for {Hook}, use", "you build things people actually use."),
+    line("hookFallback", "If AI has nothing specific for {Hook}, use", "you build things people actually use."),
     field("closing", "Closing", "Thank you for your time. I'd welcome the chance to talk about how I could contribute this summer.", 2),
     line("signoff", "Sign-off", "Sincerely,"),
     h("div", { class: "row", style: { marginTop: "8px" } }, h("button", { class: "btn", onclick: () => withBusy("coverPreview", preview, renderResumeTab), disabled: !C.coverReady(c) }, "Preview with a sample company"))
   );
 }
 
-// ----------------------------------------------------- feedback to Claude
+// ----------------------------------------------------- feedback to AI
 
-// Standing instructions: what you've asked Claude to always do.
+// Standing instructions: what you've asked AI to always do.
 function rememberInstruction(text) {
   const lines = (S.settings.instructions || "").split("\n").map((l) => l.trim()).filter(Boolean);
   if (!lines.includes(text)) lines.push(text);
@@ -1992,7 +1992,7 @@ function rememberInstruction(text) {
   saveSettings();
 }
 
-// "Tell Claude what it got wrong": a button that opens a box. run(text)
+// "Tell AI what it got wrong": a button that opens a box. run(text)
 // does the work; rerender() redraws the tab it lives on.
 function feedbackBox({ key, button, placeholder, run, rerender, primary = false }) {
   const st = (S.fb[key] ||= { open: false, text: "", remember: false });
@@ -2016,7 +2016,7 @@ function feedbackBox({ key, button, placeholder, run, rerender, primary = false 
     { class: "change", style: { marginTop: "6px" } },
     textarea({ rows: 2, value: st.text, placeholder, oninput: (e) => (st.text = e.target.value) }),
     h("label", { class: "row small", style: { margin: "4px 0" } }, h("input", { type: "checkbox", checked: st.remember, onchange: (e) => (st.remember = e.target.checked) }), "Remember this for every application"),
-    h("div", { class: "row end" }, h("button", { class: "btn ghost small", onclick: () => ((S.fb[key].open = false), rerender()) }, "Cancel"), h("button", { class: "btn primary small", onclick: go }, "Send to Claude"))
+    h("div", { class: "row end" }, h("button", { class: "btn ghost small", onclick: () => ((S.fb[key].open = false), rerender()) }, "Cancel"), h("button", { class: "btn primary small", onclick: go }, "Send to AI"))
   );
 }
 
@@ -2034,7 +2034,7 @@ function bankCard() {
     h(
       "p",
       { class: "small muted" },
-      "Answer the questions applications ask most, once, in your own words. When a form asks the same thing, even worded differently, Claude matches it and your answer is used as written ({Company} and {Role} filled in). These count as your words, so Autopilot can submit them; questions nobody answered here wait for your review."
+      "Answer the questions applications ask most, once, in your own words. When a form asks the same thing, even worded differently, AI matches it and your answer is used as written ({Company} and {Role} filled in). These count as your words, so Autopilot can submit them; questions nobody answered here wait for your review."
     ),
     S.bank.map((b, i) =>
       h(
@@ -2074,6 +2074,7 @@ function renderSettings() {
 
   const status = h("span", { class: "small" });
   const usingCC = st.provider === "claude-code";
+  const usingOpenAI = st.provider === "openai";
 
   const testButton = h(
     "button",
@@ -2104,6 +2105,7 @@ function renderSettings() {
     { class: "stack", style: { marginBottom: "10px" } },
     [
       ["claude-code", "My Claude subscription (via Claude Code)", "Uses your Pro/Max plan's limits. No API key needed. Needs Claude Code and Node.js on this computer."],
+      ["openai", "OpenAI API key (ChatGPT models)", "Pay-as-you-go API billing. Your ChatGPT subscription does not cover these API calls."],
       ["api", "Anthropic API key", "Pay-as-you-go, about 5–15¢ per tailored resume on Opus 5.5. Works on any computer."],
     ].map(([v, title, sub]) =>
       h(
@@ -2172,12 +2174,20 @@ function renderSettings() {
       ),
     ];
   } else {
-    const keyInput = h("input", { type: "password", value: st.apiKey, placeholder: "sk-ant-…", autocomplete: "off", oninput: (e) => ((st.apiKey = e.target.value.trim()), saveSettings()) });
+    const keyField = usingOpenAI ? "openaiApiKey" : "apiKey";
+    const modelField = usingOpenAI ? "openaiModel" : "model";
+    const models = usingOpenAI ? AI.OPENAI_MODELS : AI.MODELS;
+    const keysUrl = usingOpenAI ? "https://platform.openai.com/api-keys" : "https://console.anthropic.com/settings/keys";
+    const keyInput = h("input", { type: "password", value: st[keyField], placeholder: usingOpenAI ? "sk-…" : "sk-ant-…", autocomplete: "off", oninput: (e) => {
+      st[keyField] = e.target.value.trim();
+      st.aiVerified = false;
+      saveSettings();
+    } });
     body = [
       h(
         "ol",
         { class: "small", style: { paddingLeft: "18px", margin: "0 0 10px" } },
-        h("li", {}, "Go to ", h("a", { href: "https://console.anthropic.com/settings/keys", target: "_blank" }, "console.anthropic.com → API Keys"), " and create a key."),
+        h("li", {}, "Go to ", h("a", { href: keysUrl, target: "_blank" }, usingOpenAI ? "platform.openai.com → API keys" : "console.anthropic.com → API Keys"), " and create a key."),
         h("li", {}, "Add a few dollars of credit under Billing."),
         h("li", {}, "Paste the key below and click Save & test.")
       ),
@@ -2196,12 +2206,12 @@ function renderSettings() {
         "label",
         { class: "field" },
         h("span", {}, "Model"),
-        h("select", { onchange: (e) => ((st.model = e.target.value), saveSettings()) }, AI.MODELS.map((m) => h("option", { value: m.id, selected: st.model === m.id }, m.label)))
+        h("select", { onchange: (e) => { st[modelField] = e.target.value; st.aiVerified = false; saveSettings(); } }, models.map((m) => h("option", { value: m.id, selected: st[modelField] === m.id }, m.label)))
       ),
     ];
   }
 
-  const aiCard = h("div", { class: "card" }, h("h3", {}, "Connect Claude"), providerPick, body, h("div", { class: "row" }, testButton, status));
+  const aiCard = h("div", { class: "card" }, h("h3", {}, "Connect AI"), providerPick, body, h("div", { class: "row" }, testButton, status));
 
   const pf = (key, label, placeholder = "") =>
     h("label", { class: "field" }, h("span", {}, label), h("input", { type: "text", value: p[key] || "", placeholder, oninput: (e) => ((p[key] = e.target.value), saveProfile()) }));
@@ -2531,8 +2541,8 @@ function renderSettings() {
   const instructionsCard = h(
     "div",
     { class: "card" },
-    h("h3", {}, "Instructions for Claude"),
-    h("p", { class: "small muted" }, "Things Claude should always do when filling applications and tailoring, one per line. Feedback you mark \"Remember\" lands here."),
+    h("h3", {}, "Instructions for AI"),
+    h("p", { class: "small muted" }, "Things AI should always do when filling applications and tailoring, one per line. Feedback you mark \"Remember\" lands here."),
     textarea({ rows: 3, value: st.instructions || "", placeholder: "e.g. For internship vs co-op questions, pick the summer internship.", oninput: (e) => ((st.instructions = e.target.value), saveSettings()) })
   );
 
@@ -2550,7 +2560,7 @@ function renderSettings() {
     "div",
     { class: "card" },
     h("h3", {}, "What jobs to look for"),
-    h("p", { class: "small muted" }, tg.summary || "Claude reads your resume and decides which roles fit: the fields, the degree level, and what to rule out. Every listing is then scored against this without AI."),
+    h("p", { class: "small muted" }, tg.summary || "AI reads your resume and decides which roles fit: the fields, the degree level, and what to rule out. Every listing is then scored against this without AI."),
     h(
       "div",
       { class: "chips", style: { margin: "6px 0" } },
@@ -2685,7 +2695,7 @@ async function init() {
   });
   chrome.windows?.onFocusChanged?.addListener(refreshContext);
 
-  if (!settings.aiVerified && !settings.apiKey && !base && !resumePdf) S.activeTab = "settings";
+  if (!settings.aiVerified && (settings.provider === "claude-code" || !AI.isConfigured(settings)) && !base && !resumePdf) S.activeTab = "settings";
   switchTab(S.activeTab);
   await refreshContext();
 

@@ -1,5 +1,13 @@
-// Claude calls: resume parsing (once) and per-job bullet rewrites + answers.
+// Provider-independent AI calls: resume parsing and per-job rewrites + answers.
 import { Anthropic } from "../vendor/anthropic.js";
+import { callOpenAI, DEFAULT_OPENAI_MODEL } from "./openai.js";
+export { OPENAI_MODELS } from "./openai.js";
+
+export function isConfigured(settings) {
+  if (settings.provider === "claude-code") return true;
+  if (settings.provider === "openai") return !!settings.openaiApiKey?.trim();
+  return !!settings.apiKey?.trim();
+}
 
 export const MODELS = [
   { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5 (fast, recommended)" },
@@ -53,7 +61,7 @@ export function bridge(msg) {
       if (err) {
         const m = err.message || "";
         if (/not found|forbidden|not allowed/i.test(m)) {
-          return reject(new Error("The Claude Code bridge isn't installed yet. Follow the one-time setup in Settings → Connect Claude."));
+          return reject(new Error("The Claude Code bridge isn't installed yet. Follow the one-time setup in Settings → Connect AI."));
         }
         if (/exited/i.test(m)) return reject(new Error("The Claude Code bridge stopped unexpectedly. Re-run `node bridge/install.js`, then try again."));
         return reject(new Error(`Bridge error: ${m}`));
@@ -110,16 +118,19 @@ async function cached(key, fn) {
 }
 
 function modelFor(settings) {
+  if (settings.provider === "openai") return `openai:${settings.openaiModel || DEFAULT_OPENAI_MODEL}`;
   return settings.provider === "claude-code" ? `cc:${settings.ccModel || "sonnet"}` : `api:${settings.model}`;
 }
 
 async function callJSON(settings, opts) {
-  const key = await sha256(JSON.stringify([modelFor(settings), opts.system, opts.content, opts.schema, opts.effort]));
+  if (!isConfigured(settings)) throw new Error("Connect AI in Settings first.");
+  const key = await sha256(JSON.stringify([modelFor(settings), opts.system, opts.content, opts.schema, opts.effort, opts.maxTokens]));
   return cached(key, () => callJSONUncached(settings, opts));
 }
 
 async function callJSONUncached(settings, { system, content, schema, effort = "low", maxTokens = 16000 }) {
   if (settings.provider === "claude-code") return callViaClaudeCode(settings, { system, content, schema, effort });
+  if (settings.provider === "openai") return callOpenAI(settings, { system, content, schema, effort, maxTokens });
   const client = makeClient(settings);
   const params = {
     model: settings.model,
@@ -149,6 +160,14 @@ async function callJSONUncached(settings, { system, content, schema, effort = "l
 }
 
 export async function testConnection(settings) {
+  if (settings.provider === "openai") {
+    const r = await callOpenAI(settings, {
+      system: "Reply in the requested JSON format.", content: 'Reply with ok set to "OK".',
+      schema: obj({ ok: { type: "string", enum: ["OK"] } }), maxTokens: 2048,
+    });
+    if (r.ok !== "OK") throw new Error("OpenAI returned an unexpected connection test response.");
+    return r.ok;
+  }
   if (settings.provider === "claude-code") {
     const ping = await pingBridge();
     const r = await callViaClaudeCode(settings, {
