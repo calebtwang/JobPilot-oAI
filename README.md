@@ -109,6 +109,16 @@ Settings → Autopilot: auto-submit on/off, jobs at once, a randomized pause bet
 - "Save for next time" on an AI answer reuses it for the same question on later applications, with no AI call.
 - Default model is Sonnet, which is fast. Pick Opus in Settings for the best writing.
 
+## Sites that need an account (opt-in)
+
+Some sites (Workday and others) make you sign in before applying. **Settings → Accounts & sign-in** lets JobPilot handle that, after you read what it does and turn it on yourself:
+
+- **Sign in with Google**: when a site offers it, JobPilot clicks it, picks your Google account (the one matching your profile email) and continues past Google's "share your name and email" screen. You sign in to Google yourself, once, in this browser. JobPilot never sees or types your Google password, and stops if Google asks for it, wants to verify it's you, or the site asks for more than your basic profile.
+- **Create accounts** (off by default): when there's no Google option, JobPilot signs up with your profile email and a generated password per site, accepting the site's terms for you. Passwords are listed in Settings (show / copy / forget) and kept in this browser's extension storage, which isn't encrypted.
+- **Verification codes**: codes sites email you are read from the Gmail inbox you're signed into in this browser (unread emails only; nothing is sent). Sites that email a confirmation *link* instead stop as *Needs you*.
+
+Autopilot uses this whenever it hits a sign-in wall (and stops attempting account-only sites like Workday as *Apply manually* once it's on); the Apply tab has a **Sign in / create an account on this page** button. CAPTCHAs always stop it. Google's sign-in pages and Gmail's inbox feed aren't official interfaces, so Google may flag automated sign-ins or change them; JobPilot falls back to *Needs you* when anything doesn't match.
+
 ## Telling Claude what it got wrong
 
 Wherever Claude did something, there's a way to say what to change:

@@ -30,6 +30,8 @@ export const DEFAULT_SETTINGS = {
   updateBranch: "main",
   autoUpdate: "ask", // "auto" | "ask" | "off"
   target: DEFAULT_TARGET, // what jobs to look for, read from your resume (fit.js)
+  // Signing in to job sites for you (lib/accounts.js). Off until you agree to it in Settings.
+  accounts: { enabled: false, agreedAt: 0, google: true, createAccounts: false, readGmail: true },
   instructions: "", // standing instructions for Claude, one per line (Settings → Instructions for Claude)
   coverAttach: "any", // attach your cover letter to "any" cover letter field | "required" ones only | "off"
 };
@@ -91,6 +93,7 @@ export async function getSettings() {
   s.filters = { ...DEFAULT_FILTERS, ...s.filters };
   s.autopilot = { ...DEFAULT_AUTOPILOT, ...s.autopilot };
   s.target = { ...DEFAULT_TARGET, ...s.target };
+  s.accounts = { ...DEFAULT_SETTINGS.accounts, ...s.accounts };
   // The job list used to default to 30 days; move that old default to 7 once.
   if (!s.ageDefault7) {
     if (s.filters.maxAgeDays === 30) s.filters.maxAgeDays = 7;

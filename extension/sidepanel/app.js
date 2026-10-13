@@ -12,6 +12,8 @@ import { resolveStuck, fixWithFeedback } from "../lib/resolve.js";
 import * as C from "../lib/cover.js";
 import * as E from "../lib/eligibility.js";
 import * as Fit from "../lib/fit.js";
+import * as Accounts from "../lib/accounts.js";
+import { gmailAccount } from "../lib/gmail.js";
 import * as Sources from "../lib/sources.js";
 import * as Autopilot from "../lib/autopilot.js";
 import * as Ans from "../lib/answers.js";
@@ -34,6 +36,7 @@ const S = {
   eligPage: {}, // jobKey -> signals read from the open posting
   fb: {}, // open feedback boxes: key -> { open, text, remember }
   saved: {}, // jobKey -> { key, company, title, url, locations, note, savedAt }: jobs you saved for later
+  accounts: {}, // siteKey -> { email, password, createdAt, company, verified }: accounts JobPilot made
   showSaved: false, // Jobs tab: show your saved jobs instead of the list
   fixResult: null, // last "fix with my feedback" result on the Apply tab
   jobsCache: { fetchedAt: 0, items: [] },
@@ -83,6 +86,13 @@ function invalidate() {
 }
 
 const $ = (sel) => document.querySelector(sel);
+
+// el.append(a, cond ? b : null) should skip empty values like h() does,
+// not print "null"/"false" into the panel.
+const nativeAppend = Element.prototype.append;
+Element.prototype.append = function (...nodes) {
+  return nativeAppend.apply(this, nodes.filter((n) => n !== null && n !== undefined && n !== false));
+};
 
 function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
@@ -590,7 +600,25 @@ function fillCard(hasResume) {
   const file = hasResume ? { name: resumeNameForJob() } : null;
   card.append(
     h("p", { class: "muted small" }, "Fills in your name, contact details, school, links and standard questions, and attaches ", file ? h("strong", {}, file.name) : "your resume", ". If it gets stuck on a field, Claude picks the matching option from your profile; anything that needs your own words is left for you. Already-filled fields are left alone."),
-    h("button", { class: "btn primary block", onclick: doAutofill, disabled: S.busy.fill }, S.busy.fill ? [spinner(), " Filling…"] : "Autofill this page")
+    h("button", { class: "btn primary block", onclick: doAutofill, disabled: S.busy.fill }, S.busy.fill ? [spinner(), " Filling…"] : "Autofill this page"),
+    // Sign-in wall? Same flow Autopilot uses (Settings → Accounts & sign-in).
+    S.settings.accounts?.enabled
+      ? h(
+          "button",
+          {
+            class: "btn ghost block",
+            style: { marginTop: "6px" },
+            disabled: S.busy.signin,
+            onclick: () =>
+              withBusy("signin", async () => {
+                const r = await Accounts.signInFlow(S.tab, { settings: S.settings, profile: profileForJob(), job: { company: jobLabel().company, url: S.tab.url }, step: (t) => ((S.signinStep = t), invalidate()) });
+                S.signinStep = "";
+                toast(r.note || (r.ok ? "Done" : "Couldn't sign in"), !r.ok);
+              }),
+          },
+          S.busy.signin ? [spinner(), ` ${S.signinStep || "Signing in…"}`] : "Sign in / create an account on this page"
+        )
+      : null
   );
   const r = S.report;
   if (r) {
@@ -2169,6 +2197,96 @@ function feedbackBox({ key, button, placeholder, run, rerender, primary = false 
   );
 }
 
+// --------------------------------------------- accounts & sign-in
+
+const acctUi = { reveal: {}, gmail: null }; // passwords shown; Gmail status
+
+function accountsCard() {
+  const a = S.settings.accounts;
+  const set = (k, v) => ((a[k] = v), saveSettings(), renderSettings());
+  const toggle = (k, label, note) =>
+    h("label", { class: "row small", style: { margin: "6px 0", alignItems: "flex-start" } }, h("input", { type: "checkbox", checked: !!a[k], onchange: (e) => set(k, e.target.checked) }), h("div", {}, label, note ? h("div", { class: "muted" }, note) : null));
+
+  const card = h("div", { class: "card", id: "card-accounts" }, h("h3", {}, "Accounts & sign-in"));
+  if (!a.enabled) {
+    card.append(
+      h("p", { class: "small muted" }, "Some sites (Workday and others) want an account before you can apply. JobPilot can sign in for you with \"Sign in with Google\", or make an account with your email, and read the verification codes they email you. Off until you turn it on."),
+      h(
+        "div",
+        { class: "notice warn small" },
+        h("strong", {}, "Before you turn this on"),
+        h(
+          "ul",
+          { class: "report-list", style: { margin: "4px 0 0" } },
+          h("li", {}, "You sign in to Google yourself, once, in this browser. JobPilot never sees or types your Google password, and stops if Google asks for it or wants to verify it's you."),
+          h("li", {}, "With Sign in with Google, JobPilot picks your account and clicks Continue on Google's \"share your name and email\" screen for each job site. It stops if a site asks for more than that."),
+          h("li", {}, "It reads verification codes from your Gmail inbox in this browser (unread emails only, nothing is sent)."),
+          h("li", {}, "If you allow new accounts, JobPilot accepts each site's terms for you and keeps the generated passwords in this browser's extension storage, which isn't encrypted."),
+          h("li", {}, "Google and job sites may flag automated sign-ins. Google's pages aren't an official interface, so this can stop working.")
+        )
+      ),
+      h("button", { class: "btn primary", style: { marginTop: "8px" }, onclick: () => ((a.enabled = true), (a.agreedAt = Date.now()), saveSettings(), renderSettings()) }, "I understand, turn it on")
+    );
+    return card;
+  }
+
+  // Gmail status (checked once per panel open).
+  if (acctUi.gmail === null) {
+    acctUi.gmail = "…";
+    gmailAccount(S.profile.email)
+      .then((who) => ((acctUi.gmail = who || ""), renderSettings()))
+      .catch(() => ((acctUi.gmail = ""), renderSettings()));
+  }
+  const gm = acctUi.gmail;
+  card.append(
+    toggle("google", "Use \"Sign in with Google\" when a site offers it", "Make sure you're signed in to Google in this browser with " + (S.profile.email || "your profile email") + "."),
+    toggle("createAccounts", "Create an account with my email when there's no Google option", "Uses a generated password per site, saved below. JobPilot accepts the site's terms for you."),
+    toggle("readGmail", "Read verification codes from my Gmail", gm === "…" ? "Checking Gmail…" : gm ? `Gmail inbox: ${gm}` : "Not signed in to Gmail in this browser: open gmail.com and sign in."),
+    S.profile.email && gm && gm !== "…" && gm.includes("@") && gm.toLowerCase() !== S.profile.email.toLowerCase()
+      ? h("div", { class: "notice warn small" }, `Your profile email (${S.profile.email}) isn't the Gmail inbox above, so codes sent to it won't be found.`)
+      : null
+  );
+
+  // Accounts JobPilot made.
+  const accts = S.accounts || {};
+  const keys = Object.keys(accts).sort((x, y) => (accts[y].createdAt || 0) - (accts[x].createdAt || 0));
+  card.append(h("div", { class: "small", style: { fontWeight: 600, margin: "10px 0 4px" } }, `Accounts JobPilot made (${keys.length})`));
+  if (!keys.length) card.append(h("div", { class: "small muted" }, "None yet."));
+  for (const k of keys) {
+    const x = accts[k];
+    card.append(
+      h(
+        "div",
+        { class: "change", style: { padding: "6px 8px" } },
+        h("div", { class: "row small" }, h("strong", {}, x.company || k), h("span", { class: "muted" }, k), h("span", { class: "spacer" }), x.verified ? null : h("span", { class: "pill warn" }, "not confirmed")),
+        h(
+          "div",
+          { class: "row small", style: { marginTop: "4px" } },
+          h("span", {}, x.email),
+          h("code", {}, acctUi.reveal[k] ? x.password : "••••••••••"),
+          h("button", { class: "btn ghost small", onclick: () => ((acctUi.reveal[k] = !acctUi.reveal[k]), renderSettings()) }, acctUi.reveal[k] ? "Hide" : "Show"),
+          h("button", { class: "btn ghost small", onclick: async () => (await navigator.clipboard.writeText(x.password), toast("Password copied")) }, "Copy"),
+          h(
+            "button",
+            {
+              class: "btn ghost small",
+              onclick: async () => {
+                if (!confirm(`Forget the saved password for ${k}? (The account on the site stays.)`)) return;
+                delete accts[k];
+                await persist("accounts", accts);
+                renderSettings();
+              },
+            },
+            "Forget"
+          )
+        )
+      )
+    );
+  }
+  card.append(h("div", { class: "row end", style: { marginTop: "8px" } }, h("button", { class: "btn ghost small", onclick: () => ((a.enabled = false), saveSettings(), renderSettings()) }, "Turn off")));
+  return card;
+}
+
 // ------------------------------------------------------- answer bank
 
 const saveBank = debounce(() => persist("answerBank", S.bank), 400);
@@ -2735,7 +2853,7 @@ function renderSettings() {
     )
   );
 
-  el.replaceChildren(...[setupGuide()].filter(Boolean), aiCard, profileCard, targetCard, answersCard, bankCard(), instructionsCard, autopilotCard, sourceCard, filesCard, updatesCard, dataCard);
+  el.replaceChildren(...[setupGuide()].filter(Boolean), aiCard, profileCard, targetCard, accountsCard(), answersCard, bankCard(), instructionsCard, autopilotCard, sourceCard, filesCard, updatesCard, dataCard);
 }
 
 function hr() {
@@ -2798,7 +2916,7 @@ renderSettings = keepFocus(renderSettings);
 async function init() {
   // The 5k-job cache is big: show the panel first, load it right after.
   const jobsPromise = Jobs.getJobs();
-  const [settings, profile, base, resumePdf, tailored, applied, cover, bank, eligStore, saved] = await Promise.all([
+  const [settings, profile, base, resumePdf, tailored, applied, cover, bank, eligStore, saved, accounts] = await Promise.all([
     store.getSettings(),
     store.getProfile(),
     store.get("resume", null),
@@ -2809,8 +2927,9 @@ async function init() {
     store.get("answerBank", null),
     store.get("eligCache", {}),
     store.get("saved", {}),
+    store.get("accounts", {}),
   ]).then((r) => ((r[6] = { ...C.DEFAULT_COVER, ...(r[6] || {}) }), (r[7] = r[7] || C.DEFAULT_BANK.map((b) => ({ ...b }))), r));
-  Object.assign(S, { settings, profile, base, resumePdf, tailored, applied, cover, bank, saved });
+  Object.assign(S, { settings, profile, base, resumePdf, tailored, applied, cover, bank, saved, accounts });
   // Simplify eligibility data younger than a week.
   for (const [id, e] of Object.entries(eligStore || {})) if (Date.now() - e.at < ELIG_TTL) (S.eligStore[id] = e), (S.eligSignals[id] = e.signals);
   jobsPromise.then((jobsCache) => {
@@ -2874,6 +2993,7 @@ async function init() {
     tailored: (v) => (S.tailored = v || {}),
     applied: (v) => (S.applied = v || {}),
     saved: (v) => (S.saved = v || {}),
+    accounts: (v) => (S.accounts = v || {}),
     coverLetter: (v) => (S.cover = { ...C.DEFAULT_COVER, ...(v || {}) }),
     answerBank: (v) => (S.bank = v || []),
     autopilotQueue: (v) => !S.autopilotRunning && (S.queue = v || []),
