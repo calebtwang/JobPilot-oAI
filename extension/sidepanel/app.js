@@ -22,6 +22,11 @@ import { prepareJob, tailoredEntry, gradIfAccepted } from "../lib/tailor.js";
 
 const S = {
   settings: null,
+  chatgptSession: null,
+  chatgptModels: [],
+  chatgptError: "",
+  chatgptLoading: false,
+  chatgptSigningIn: false,
   profile: null,
   base: null, // resume model
   resumePdf: null, // { name, base64 } originally uploaded file
@@ -2067,6 +2072,116 @@ const EEO = {
   disability: ["Decline to self-identify", "No, I do not have a disability", "Yes, I have a disability"],
 };
 
+async function refreshChatGPT() {
+  if (S.chatgptLoading) return;
+  S.chatgptLoading = true;
+  S.chatgptError = "";
+  try {
+    const session = await AI.chatGPTStatus();
+    S.chatgptSession = session;
+    const st = S.settings;
+    if (!st.chatgptAccountId) st.chatgptAccountId = session.active || "";
+    const account = session.accounts.find((a) => a.id === st.chatgptAccountId);
+    st.chatgptPlanEnabled = !!account?.planEnabled;
+    S.chatgptModels = st.chatgptPlanEnabled ? await AI.chatGPTModels(st.chatgptAccountId) : [];
+    if (!S.chatgptModels.some((m) => m.id === st.chatgptModel)) st.chatgptModel = S.chatgptModels[0]?.id || "";
+    await store.set("settings", st);
+  } catch (error) {
+    S.chatgptError = error.message;
+    S.settings.chatgptPlanEnabled = false;
+    S.chatgptModels = [];
+    await store.set("settings", S.settings);
+  } finally {
+    S.chatgptLoading = false;
+    if (S.activeTab === "settings") renderSettings();
+  }
+}
+
+function chatGPTWelcome() {
+  if (S.settings.chatgptWelcomeSeen) return;
+  const dialog = h("dialog", { style: { maxWidth: "360px", padding: "20px", borderRadius: "12px", border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text)" } },
+    h("h3", {}, "You’re using your ChatGPT plan"),
+    h("p", {}, "Eligible AI requests in JobPilot use your ChatGPT plan or available credits. You can manage app access and usage in ChatGPT settings."),
+    h("p", {}, h("a", { href: "https://chatgpt.com/settings/usage", target: "_blank" }, "Manage usage")),
+    h("button", { class: "btn primary", onclick: () => dialog.close() }, "Got it")
+  );
+  dialog.addEventListener("close", () => { S.settings.chatgptWelcomeSeen = true; saveSettings(); dialog.remove(); });
+  document.body.append(dialog);
+  dialog.showModal();
+}
+
+async function connectChatGPT(newAccount = false) {
+  if (S.chatgptSigningIn) return;
+  S.chatgptSigningIn = true;
+  S.chatgptError = "";
+  renderSettings();
+  try {
+    const accountId = newAccount ? undefined : S.settings.chatgptAccountId || undefined;
+    const current = S.chatgptSession?.accounts.find((a) => a.id === accountId);
+    const session = await AI.signInChatGPT(accountId, !!current?.connected && !current.planEnabled);
+    S.chatgptSession = session;
+    S.settings.chatgptAccountId = session.active || "";
+    S.settings.aiVerified = false;
+    await refreshChatGPT();
+    if (S.settings.chatgptPlanEnabled) chatGPTWelcome();
+  } catch (error) { S.chatgptError = error.message; }
+  finally { S.chatgptSigningIn = false; renderSettings(); }
+}
+
+function chatGPTSettingsBody() {
+  const st = S.settings;
+  const accounts = S.chatgptSession?.accounts || [];
+  const account = accounts.find((a) => a.id === st.chatgptAccountId);
+  const changeAccount = async (id) => {
+    try {
+      st.chatgptAccountId = id;
+      st.chatgptModel = "";
+      st.chatgptPlanEnabled = false;
+      st.aiVerified = false;
+      S.chatgptModels = [];
+      S.chatgptSession = await AI.selectChatGPTAccount(id);
+      await refreshChatGPT();
+    } catch (error) { S.chatgptError = error.message; renderSettings(); }
+  };
+  return [
+    h("p", { class: "small muted" }, "Install Node.js 20 or newer, run node bridge/install.js from this repo, then restart your browser. Claude Code is optional. Continue with ChatGPT opens sign-in in a browser tab; keep this JobPilot panel open until it finishes."),
+    S.chatgptError && h("p", { class: "pill bad", style: { whiteSpace: "normal" } }, S.chatgptError),
+    S.chatgptLoading && h("p", {}, spinner(), " Loading ChatGPT connection…"),
+    accounts.length > 0 && h("label", { class: "field" }, h("span", {}, "ChatGPT account / workspace"),
+      h("select", { disabled: S.chatgptSigningIn || S.chatgptLoading, onchange: (e) => changeAccount(e.target.value) },
+        h("option", { value: "", selected: !account, disabled: true }, "Choose an account"),
+        accounts.map((a, i) => h("option", { value: a.id, selected: st.chatgptAccountId === a.id }, `${a.email || "ChatGPT account"} · Connection ${i + 1}${a.connected ? "" : " (signed out)"}`))
+      )
+    ),
+    account?.connected && h("p", { class: "small" }, account.planEnabled ? "Using ChatGPT plan" : "Signed in. ChatGPT plan usage is not enabled."),
+    h("div", { class: "row" },
+      h("button", { class: "btn primary", disabled: S.chatgptSigningIn || S.chatgptLoading, onclick: () => connectChatGPT() }, "Continue with ChatGPT"),
+      h("button", { class: "btn ghost", disabled: S.chatgptSigningIn || S.chatgptLoading, onclick: () => connectChatGPT(true) }, "Add account"),
+      S.chatgptSigningIn && h("button", { class: "btn ghost", onclick: AI.cancelChatGPTSignIn }, "Cancel sign-in")
+    ),
+    S.chatgptSigningIn && h("p", { class: "small muted" }, spinner(), " Complete sign-in in the browser tab…"),
+    S.chatgptModels.length > 0 && h("label", { class: "field" }, h("span", {}, "Model · Using ChatGPT plan"),
+      h("select", { onchange: (e) => { st.chatgptModel = e.target.value; st.aiVerified = false; saveSettings(); } }, S.chatgptModels.map((m) => h("option", { value: m.id, selected: st.chatgptModel === m.id }, m.label)))
+    ),
+    h("div", { class: "row" },
+      h("a", { href: "https://chatgpt.com/settings/usage", target: "_blank" }, "Manage usage"),
+      h("button", { class: "btn ghost", disabled: S.chatgptLoading || S.chatgptSigningIn, onclick: refreshChatGPT }, "Refresh connection"),
+      account?.connected && h("button", { class: "btn ghost", disabled: S.chatgptLoading || S.chatgptSigningIn, onclick: async () => {
+        try {
+          const session = await AI.signOutChatGPT(st.chatgptAccountId);
+          S.chatgptSession = session;
+          st.chatgptPlanEnabled = false;
+          st.aiVerified = false;
+          S.chatgptModels = [];
+          await store.set("settings", st);
+          toast(session.revoked ? "Signed out of ChatGPT." : "Signed out locally. Remote revocation wasn't confirmed; disconnect JobPilot in ChatGPT settings.", !session.revoked);
+        } catch (error) { S.chatgptError = error.message; }
+        renderSettings();
+      } }, "Sign out")
+    )
+  ];
+}
+
 function renderSettings() {
   const el = $("#tab-settings");
   const st = S.settings;
@@ -2075,11 +2190,14 @@ function renderSettings() {
   const status = h("span", { class: "small" });
   const usingCC = st.provider === "claude-code";
   const usingOpenAI = st.provider === "openai";
+  const usingChatGPT = st.provider === "chatgpt";
+  if (usingChatGPT && !S.chatgptSession && !S.chatgptLoading && !S.chatgptError) refreshChatGPT();
 
   const testButton = h(
     "button",
     {
       class: "btn primary",
+      disabled: usingChatGPT && (!st.chatgptPlanEnabled || !st.chatgptModel || S.chatgptLoading || S.chatgptSigningIn),
       onclick: async (e) => {
         e.target.disabled = true;
         status.replaceChildren(spinner(), usingCC ? " Asking Claude Code… (can take ~10s)" : " Testing…");
@@ -2105,6 +2223,7 @@ function renderSettings() {
     { class: "stack", style: { marginBottom: "10px" } },
     [
       ["claude-code", "My Claude subscription (via Claude Code)", "Uses your Pro/Max plan's limits. No API key needed. Needs Claude Code and Node.js on this computer."],
+      ["chatgpt", "My ChatGPT subscription", "Eligible Plus/Pro plan or credits through Sign in with ChatGPT. No API key. Needs Node.js and the JobPilot bridge."],
       ["openai", "OpenAI API key (ChatGPT models)", "Pay-as-you-go API billing. Your ChatGPT subscription does not cover these API calls."],
       ["api", "Anthropic API key", "Pay-as-you-go, about 5–15¢ per tailored resume on Opus 5.5. Works on any computer."],
     ].map(([v, title, sub]) =>
@@ -2128,7 +2247,9 @@ function renderSettings() {
   );
 
   let body;
-  if (usingCC) {
+  if (usingChatGPT) {
+    body = chatGPTSettingsBody();
+  } else if (usingCC) {
     const cmd = "node bridge/install.js";
     body = [
       h("div", { class: "small", style: { fontWeight: 600 } }, "One-time setup"),
@@ -2704,6 +2825,8 @@ async function init() {
     renderUpdateBanner(last);
     if (Update.isStale(last)) Update.checkForUpdate(settings).then(renderUpdateBanner).catch(() => {});
   }
+
+  if (settings.provider === "chatgpt") await refreshChatGPT();
 
   // No job target yet but a resume is there: read it once in the background.
   if (!settings.target?.builtAt && hasContent(base) && aiReady()) buildTargetFromResume({ quiet: true }).catch(() => {});

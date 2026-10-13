@@ -58,6 +58,19 @@ Choose **OpenAI API key (ChatGPT models)** under **Settings → Connect AI**. Cr
 
 OpenAI supports the same workflows: PDF resume parsing, tailoring, draft answers, job targeting, feedback, and resolving stuck fields. It uses the [Responses API with structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs) and [PDF file inputs](https://developers.openai.com/api/docs/guides/file-inputs). The existing checks on rewrites and Autopilot's rule against writing text answers apply to every provider. Keys and model choices are saved separately, so switching providers preserves your Claude setup. With OpenAI selected, PDFs use the built-in renderer; local LaTeX compilation still uses the Claude Code bridge option.
 
+**Option D: your ChatGPT Plus/Pro plan (no API key)**
+
+JobPilot supports OpenAI's [Sign in with ChatGPT flow for local open-source apps](https://developers.openai.com/siwc/token-sharing-open-source). Eligible accounts can authorize use of their ChatGPT plan or available credits; account/workspace eligibility and app usage limits still apply.
+
+1. Install [Node.js](https://nodejs.org) **20 or newer**. Claude Code is optional for this option.
+2. From the repo folder, run `node bridge/install.js` (run it again if you previously installed the bridge), then restart the browser and reload JobPilot in `chrome://extensions`.
+3. Under **Settings → Connect AI**, choose **My ChatGPT subscription**, then **Continue with ChatGPT**. Keep the JobPilot panel open while you sign in and authorize plan usage in the new browser tab.
+4. Choose a model from your account's live catalog and click **Save & test**. The first successful authorization shows a confirmation explaining plan usage.
+
+**Add account** creates a separate account/workspace connection. The account picker keeps these registrations separate, including connections with the same email. **Continue with ChatGPT** reconnects the selected account, or lets you enable plan usage if you initially granted only identity access. **Manage usage** opens ChatGPT usage settings. **Sign out** attempts remote revocation, clears local tokens, and retains the registration so you can sign in again. If remote revocation cannot be confirmed, disconnect JobPilot in ChatGPT settings too.
+
+The bridge stores OAuth credentials in `~/.jobpilot/chatgpt/accounts.json`, with owner-only directory/file permissions on Unix. Credentials are never stored in browser storage; the extension saves only the selected connection ID, model and permission status. Token refresh is serialized across bridge processes. Sign out before uninstalling the bridge if you want to end the session; uninstalling the bridge alone preserves its separate credentials directory. Resume PDFs are sent directly as file input to the public Responses API. Requests use `store: false` and `stream: true`, following the [preview request requirements](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations). Requests that hit subscription limits or lose permission stop and report the error; JobPilot does not switch to API billing automatically. With ChatGPT selected, PDFs use the built-in renderer.
+
 ### 2. Upload your resume
 
 **Resume → Upload your resume (PDF).** Check the parsed boxes.
@@ -176,7 +189,7 @@ Multi-page forms: click **Autofill this page** again on each step.
 
 ## Privacy
 
-Your resume, profile, API keys and applied list are stored in `chrome.storage.local` in your browser profile. AI requests send resume and application context to your selected provider: Anthropic through Claude Code or its API, or OpenAI through its API. API keys are sent only to their respective provider for authentication. OpenAI requests set `store: false`; provider retention policies still apply. Job listings, eligibility lookups and update checks also contact the services described above.
+Your resume, profile, API keys and applied list are stored in `chrome.storage.local` in your browser profile. AI requests send resume and application context to your selected provider: Anthropic through Claude Code or its API, or OpenAI through its API using your API key or authorized ChatGPT plan. Subscription OAuth tokens stay in the local bridge credential file described above. API keys are sent only to their respective provider for authentication. OpenAI requests set `store: false`; provider retention policies still apply. Job listings, eligibility lookups and update checks also contact the services described above.
 
 ## Development
 
@@ -189,7 +202,7 @@ extension/          the unpacked extension (no build step needed)
                     update.js (self-update from GitHub)
   fonts/            CMU Serif (Computer Modern, SIL OFL) for the built-in renderer
   vendor/           bundled @anthropic-ai/sdk and jsPDF
-bridge/             native messaging host that runs Claude Code (`claude -p`), compiles LaTeX, and pulls updates; plus its installer
+bridge/             native messaging host for Claude Code (`claude -p`), ChatGPT plan sign-in/inference, LaTeX and updates; plus its installer
 ```
 
 Bump `version` in `extension/manifest.json` when you ship something, so people without the bridge get notified. People with the bridge see every new commit.
@@ -198,4 +211,4 @@ Nothing personal belongs in this repo: all user data stays in `chrome.storage.lo
 
 ### Verify AI provider integration
 
-Run `node --test tests/ai.test.mjs` for mocked provider tests (no API key or billing required). These cover OpenAI PDF/JSON requests, error handling, cache separation, connection testing, and Claude bridge routing. For a live check, load the extension, choose a provider under **Settings → Connect AI**, click **Save & test**, and upload a resume.
+Run `node --test tests/*.test.mjs` for mocked provider and subscription tests (no API key or billing required). These cover OpenAI PDF/JSON requests, Claude routing, OAuth callbacks and signed identity validation, permission checks, rotating-token refresh, model discovery, streaming failures, sign-out, and bridge packaging. The subscription tests bind only to localhost and use temporary credential files; all OpenAI responses are mocked. For a live check, load the extension, choose a provider under **Settings → Connect AI**, click **Save & test**, and upload a resume.

@@ -124,3 +124,73 @@ test('existing stored Claude settings survive new OpenAI defaults', async () => 
   assert.equal(merged.openaiApiKey, '');
   assert.equal(merged.openaiModel, 'gpt-5-mini');
 });
+
+test('ChatGPT routes through native messaging with account-specific caches and no API credentials', async () => {
+  const subscription = { ...settings, provider: 'chatgpt', chatgptAccountId: 'account-1', chatgptPlanEnabled: true, chatgptModel: 'account-model' };
+  chrome.runtime.sendNativeMessage = (host, message, callback) => {
+    native.push({ host, message });
+    if (message.type === 'chatgpt-status') callback({ ok: true, session: { accounts: [{ id: subscription.chatgptAccountId, planEnabled: true }] } });
+    else callback({ ok: true, data: { ok: subscription.chatgptAccountId } });
+  };
+  assert.deepEqual(await parseResume(subscription, 'pdf'), { ok: 'account-1' });
+  await parseResume(subscription, 'pdf');
+  assert.equal(native.filter((n) => n.message.type === 'chatgpt-run').length, 1);
+  subscription.chatgptAccountId = 'account-2';
+  assert.deepEqual(await parseResume(subscription, 'pdf'), { ok: 'account-2' });
+  assert.equal(native.filter((n) => n.message.type === 'chatgpt-run').length, 2);
+  assert.equal(calls.length, 0);
+  assert.doesNotMatch(JSON.stringify(native), /test-openai-key|test-anthropic-key/);
+});
+
+test('a signed-out ChatGPT account cannot reuse cached results', async () => {
+  const subscription = { provider: 'chatgpt', chatgptAccountId: 'a', chatgptPlanEnabled: true, chatgptModel: 'model' };
+  chrome.runtime.sendNativeMessage = (host, message, callback) => callback(message.type === 'chatgpt-status' ? { ok: true, session: { accounts: [{ id: 'a', planEnabled: true }] } } : { ok: true, data: { ok: 'OK' } });
+  await parseResume(subscription, 'pdf');
+  chrome.runtime.sendNativeMessage = (host, message, callback) => callback({ ok: true, session: { accounts: [{ id: 'a', planEnabled: false }] } });
+  await assert.rejects(parseResume(subscription, 'pdf'), /Continue with ChatGPT/);
+  assert.equal(isConfigured({ ...subscription, chatgptPlanEnabled: false, apiKey: 'other-provider' }), false);
+});
+
+test('ChatGPT connection tests bypass cache and verify the selected model', async () => {
+  const subscription = { provider: 'chatgpt', chatgptAccountId: 'a', chatgptModel: 'live-model' };
+  chrome.runtime.sendNativeMessage = (host, message, callback) => { native.push({ host, message }); callback({ ok: true, data: { ok: 'OK' } }); };
+  await testConnection(subscription); await testConnection(subscription);
+  assert.equal(native.length, 2);
+  assert.equal(native[0].message.type, 'chatgpt-run');
+  assert.equal(native[0].message.model, 'live-model');
+});
+
+test('ChatGPT sign-in opens only the official authorization URL and completes on a native result', async () => {
+  const { signInChatGPT } = await import('../extension/lib/ai.js');
+  let onMessage, onDisconnect, request, opened;
+  const session = { active: 'a', accounts: [{ id: 'a', planEnabled: true }] };
+  chrome.runtime.connectNative = () => ({
+    onMessage: { addListener: (fn) => { onMessage = fn; } },
+    onDisconnect: { addListener: (fn) => { onDisconnect = fn; } },
+    disconnect: () => onDisconnect(),
+    postMessage: (message) => {
+      request = message;
+      queueMicrotask(() => {
+        onMessage({ event: 'chatgpt-authorize', url: 'https://auth.openai.com/api/accounts/authorize?state=foo' });
+        onMessage({ ok: true, session });
+      });
+    },
+  });
+  chrome.tabs = { create: async ({ url }) => { opened = url; } };
+  assert.deepEqual(await signInChatGPT('a'), session);
+  assert.equal(request.accountId, 'a'); assert.match(opened, /^https:\/\/auth\.openai\.com\//);
+  chrome.runtime.connectNative = () => ({
+    onMessage: { addListener: (fn) => { onMessage = fn; } },
+    onDisconnect: { addListener: (fn) => { onDisconnect = fn; } },
+    disconnect: () => onDisconnect(),
+    postMessage: () => queueMicrotask(() => onMessage({ event: 'chatgpt-authorize', url: 'https://evil.example/authorize' })),
+  });
+  await assert.rejects(signInChatGPT(), /Unexpected/);
+});
+
+test('ChatGPT usage limits stop new Autopilot jobs and do not invoke API billing', async () => {
+  chrome.runtime.sendNativeMessage = (host, message, callback) => callback({ ok: false, code: 'subscription_sharing_usage_limit_exceeded', error: 'Manage usage in ChatGPT Settings.' });
+  await assert.rejects(testConnection({ provider: 'chatgpt', chatgptAccountId: 'a', chatgptModel: 'model' }), /Manage usage/);
+  assert.equal(storage.autopilotStop, true);
+  assert.equal(calls.length, 0);
+});

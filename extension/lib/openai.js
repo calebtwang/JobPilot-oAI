@@ -16,9 +16,7 @@ function apiError(status, error = {}) {
   return new Error(`OpenAI rejected the request (HTTP ${status}). Check your model and API account settings.`);
 }
 
-export async function callOpenAI(settings, { system, content, schema, effort = "low", maxTokens = 16000 }) {
-  if (!settings.openaiApiKey?.trim()) throw new Error("Add your OpenAI API key in Settings first.");
-  const model = settings.openaiModel || DEFAULT_OPENAI_MODEL;
+export function buildOpenAIRequest(model, { system, content, schema, effort = "low", maxTokens = 16000 }) {
   const parts = typeof content === "string" ? [{ type: "text", text: content }] : content;
   const input = parts.map((part) => {
     if (part.type === "text") return { type: "input_text", text: part.text };
@@ -37,6 +35,12 @@ export async function callOpenAI(settings, { system, content, schema, effort = "
   };
   if (model === "gpt-5-mini") body.reasoning = { effort };
 
+  return body;
+}
+
+export async function callOpenAI(settings, opts) {
+  if (!settings.openaiApiKey?.trim()) throw new Error("Add your OpenAI API key in Settings first.");
+  const body = buildOpenAIRequest(settings.openaiModel || DEFAULT_OPENAI_MODEL, opts);
   let data;
   for (let attempt = 0; attempt < 3; attempt++) {
     const controller = new AbortController();
@@ -64,6 +68,10 @@ export async function callOpenAI(settings, { system, content, schema, effort = "
     await new Promise((resolve) => setTimeout(resolve, delay));
   }
 
+  return parseOpenAIResponse(data);
+}
+
+export function parseOpenAIResponse(data) {
   const output = (data.output || []).filter((item) => item.type === "message").flatMap((item) => item.content || []);
   if (output.some((part) => part.type === "refusal")) throw new Error("The model declined this request. Try rephrasing or a different model.");
   if (data.status === "incomplete") throw new Error("The OpenAI response was incomplete. Try again or select another model.");
