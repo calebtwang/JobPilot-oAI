@@ -44,6 +44,7 @@ const S = {
   report: null,
   answers: null,
   busy: {},
+  taskErrors: {}, // task name -> last error message
   editing: "base",
   jobsQuery: "",
   jobsCategory: "",
@@ -56,6 +57,30 @@ const S = {
 };
 
 // ---------------------------------------------------------------- helpers
+
+// Every write to storage goes through persist(), so the storage listener can
+// tell our own writes from changes made in another JobPilot page (the pinned
+// Autopilot tab, the background worker) and apply only those.
+const lastWritten = new Map();
+function persist(key, value) {
+  try {
+    lastWritten.set(key, JSON.stringify(value));
+  } catch {}
+  return store.set(key, value);
+}
+
+// One re-render of whatever tab you're on, after the current burst of state
+// changes. Tasks and storage updates call this instead of re-rendering a
+// fixed tab.
+let renderQueued = false;
+function invalidate() {
+  if (renderQueued) return;
+  renderQueued = true;
+  queueMicrotask(() => {
+    renderQueued = false;
+    render();
+  });
+}
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -95,18 +120,23 @@ function debounce(fn, ms) {
   };
 }
 
-async function withBusy(name, fn, rerender = renderApply) {
+// Run one task on its own: it shows as busy wherever its button is, never
+// blocks other tasks, and when it ends the tab you're on refreshes (even if
+// you switched tabs meanwhile). Its last error stays in S.taskErrors[name].
+async function withBusy(name, fn) {
   if (S.busy[name]) return;
   S.busy[name] = true;
-  rerender();
+  S.taskErrors[name] = null;
+  invalidate();
   try {
     await fn();
   } catch (e) {
     console.error(e);
+    S.taskErrors[name] = e.message || String(e);
     toast(e.message || String(e), true);
   } finally {
     S.busy[name] = false;
-    rerender();
+    invalidate();
   }
 }
 
@@ -131,10 +161,10 @@ function textarea(attrs) {
   return el;
 }
 
-const saveBase = debounce(() => store.set("resume", S.base), 400);
-const saveTailored = debounce(() => store.set("tailored", S.tailored), 400);
-const saveProfile = debounce(() => store.set("profile", S.profile), 400);
-const saveSettings = debounce(() => store.set("settings", S.settings), 400);
+const saveBase = debounce(() => persist("resume", S.base), 400);
+const saveTailored = debounce(() => persist("tailored", S.tailored), 400);
+const saveProfile = debounce(() => persist("profile", S.profile), 400);
+const saveSettings = debounce(() => persist("settings", S.settings), 400);
 
 function downloadBase64(base64, filename, mime = "application/pdf") {
   return chrome.downloads.download({
@@ -166,6 +196,40 @@ function render() {
   if (S.activeTab === "jobs") renderJobs();
   if (S.activeTab === "resume") renderResumeTab();
   if (S.activeTab === "settings") renderSettings();
+}
+
+// Re-rendering replaces a tab's elements; put your cursor, selection and
+// scroll back so live updates don't interrupt typing.
+function pathIn(root, el) {
+  const path = [];
+  for (let n = el; n && n !== root; n = n.parentElement) path.unshift([...n.parentElement.children].indexOf(n));
+  return path;
+}
+function keepFocus(fn) {
+  return (...args) => {
+    const panel = document.querySelector(".panel.active");
+    const a = document.activeElement;
+    let saved = null;
+    if (panel && a && a !== document.body && panel.contains(a)) {
+      saved = { path: pathIn(panel, a), tag: a.tagName, sel: typeof a.selectionStart === "number" ? [a.selectionStart, a.selectionEnd] : null };
+    }
+    const scroll = document.scrollingElement?.scrollTop || 0;
+    const out = fn(...args);
+    if (saved && panel?.isConnected) {
+      let el = panel;
+      for (const i of saved.path) el = el?.children[i];
+      if (el && el.tagName === saved.tag && el !== document.activeElement) {
+        el.focus({ preventScroll: true });
+        if (saved.sel) {
+          try {
+            el.setSelectionRange(...saved.sel);
+          } catch {}
+        }
+      }
+    }
+    if (document.scrollingElement) document.scrollingElement.scrollTop = scroll;
+    return out;
+  };
 }
 
 // --------------------------------------------------------- job context
@@ -307,27 +371,8 @@ function renderApply() {
   const hasResume = hasContent(S.base) || !!S.resumePdf;
   const hasProfile = !!(S.profile.email && S.profile.firstName);
 
-  const aiOk = S.settings.aiVerified || (S.settings.provider === "api" && !!S.settings.apiKey);
-  if (!aiOk || !hasResume || !hasProfile) {
-    const item = (done, text, action, tab) =>
-      h(
-        "div",
-        { class: "row", style: { margin: "4px 0" } },
-        h("span", { class: `pill ${done ? "good" : "warn"}` }, done ? "Done" : "To do"),
-        h("span", { class: "spacer" }, text),
-        !done && h("button", { class: "btn", onclick: () => switchTab(tab) }, action)
-      );
-    parts.push(
-      h(
-        "div",
-        { class: "card" },
-        h("h3", {}, "Get set up (2 minutes)"),
-        item(aiOk, "Connect Claude", "Connect", "settings"),
-        item(hasResume, "Upload your resume", "Upload", "resume"),
-        item(hasProfile, "Check your application profile", "Open", "settings")
-      )
-    );
-  }
+  const guide = setupGuide();
+  if (guide) parts.push(guide);
 
   if (!S.job) {
     parts.push(
@@ -534,7 +579,7 @@ function acceptTailoring() {
   const keys = Object.keys(S.tailored).sort((a, b) => S.tailored[b].createdAt - S.tailored[a].createdAt);
   for (const k of keys.slice(40)) delete S.tailored[k];
   S.pending = null;
-  store.set("tailored", S.tailored);
+  persist("tailored", S.tailored);
   const { pages } = renderResume(S.tailored[S.job.key].resume);
   toast(pages > 1 ? "Saved, but it runs over one page. Hide a bullet or two in Edit." : "Tailored resume saved for this job.");
   renderApply();
@@ -659,7 +704,7 @@ function questionsCard(hasKey) {
                     onclick: async (e) => {
                       const saved = await store.get("savedAnswers", {});
                       saved[Ans.savedKey(a.question)] = a.answer;
-                      await store.set("savedAnswers", saved);
+                      await persist("savedAnswers", saved);
                       e.target.textContent = "Saved ✓";
                     },
                   },
@@ -742,7 +787,7 @@ function finishCard(applied) {
           onclick: () => {
             if (applied) delete S.applied[S.job.key];
             else S.applied[S.job.key] = { company: jobLabel().company, title: jobLabel().role, url: S.job.url, date: Date.now() };
-            store.set("applied", S.applied);
+            persist("applied", S.applied);
             renderApply();
           },
         },
@@ -878,10 +923,11 @@ function renderJobs() {
     h("button", { class: `btn small${S.showSaved ? " primary" : " ghost"}`, onclick: () => ((S.showSaved = true), renderJobs()) }, `★ Saved (${savedCount})`)
   );
   if (S.showSaved) {
-    el.replaceChildren(viewSwitch, savedList());
+    el.replaceChildren(...[setupGuide(), viewSwitch, savedList()].filter(Boolean));
     return;
   }
   el.replaceChildren(
+    ...[setupGuide()].filter(Boolean),
     viewSwitch,
     autopilotCard(),
     h(
@@ -904,6 +950,112 @@ function renderJobs() {
   update();
 }
 
+// ------------------------------------------------------- onboarding
+
+// The setup steps, each with what to do, where, and whether it's done.
+function setupSteps() {
+  const p = S.profile;
+  const tg = S.settings.target;
+  return [
+    {
+      id: "ai",
+      title: "Connect Claude",
+      what: "Settings → Connect Claude: pick your Claude subscription (runs through Claude Code on your Pro/Max plan) or paste an API key, then Save & test.",
+      done: S.settings.aiVerified || (S.settings.provider === "api" && !!S.settings.apiKey),
+      go: ["settings", "card-ai"],
+    },
+    {
+      id: "resume",
+      title: "Upload your resume",
+      what: "Resume tab → drop in your resume as a PDF. Claude turns it into editable boxes and keeps your layout.",
+      done: !!S.resumePdf || hasContent(S.base),
+      go: ["resume", "card-upload"],
+    },
+    {
+      id: "profile",
+      title: "Check your profile",
+      what: "Settings → Application profile: your contact info, school and graduation date, and your U.S. work status (it decides which jobs you can apply to).",
+      done: !!(p.email && p.firstName && p.gradYear && p.workStatus),
+      go: ["settings", "card-profile"],
+    },
+    {
+      id: "target",
+      title: "Confirm what jobs to look for",
+      what: "Settings → What jobs to look for: Claude reads your resume and picks the fields and degree level. Fix anything it got wrong.",
+      done: !!tg?.builtAt && !!S.settings.onboarding?.targetSeen,
+      go: ["settings", "card-target"],
+      onGo: () => {
+        S.settings.onboarding = { ...(S.settings.onboarding || {}), targetSeen: true };
+        saveSettings();
+      },
+    },
+    {
+      id: "answers",
+      title: "Write your answers (optional)",
+      what: "Settings → Your answers: answer common questions (\"Why this company?\") once in your own words, so Autopilot can submit them. Resume → Cover letter works the same way.",
+      done: S.bank.some((b) => b.text.trim()) || C.coverReady(S.cover) || !!S.settings.onboarding?.answersSkipped,
+      go: ["settings", "card-bank"],
+      skip: () => {
+        S.settings.onboarding = { ...(S.settings.onboarding || {}), answersSkipped: true };
+        saveSettings();
+      },
+    },
+    {
+      id: "apply",
+      title: "Apply to your first job",
+      what: "Jobs tab: open a ★ Good fit job and use the Apply tab (Tailor → Autofill), or start Autopilot on a batch.",
+      done: Object.keys(S.applied).length > 0 || Object.keys(S.tailored).length > 0 || S.queue.length > 0,
+      go: ["jobs", null],
+    },
+  ];
+}
+
+// Switch tabs and briefly highlight the card a step points to.
+function goToStep(step) {
+  step.onGo?.();
+  const [tab, cardId] = step.go;
+  switchTab(tab);
+  if (!cardId) return;
+  queueMicrotask(() => {
+    const el = document.getElementById(cardId);
+    if (!el) return;
+    if (el.tagName === "DETAILS") el.open = true;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    el.classList.remove("spotlight");
+    void el.offsetWidth;
+    el.classList.add("spotlight");
+  });
+}
+
+// Shown at the top of every tab until setup is done or you hide it.
+function setupGuide() {
+  if (S.settings.onboarding?.hidden) return null;
+  const steps = setupSteps();
+  const done = steps.filter((x) => x.done).length;
+  if (done === steps.length) return null;
+  const next = steps.find((x) => !x.done);
+  const fresh = done === 0;
+  return h(
+    "details",
+    { class: "card setup", open: S.setupOpen ?? true, ontoggle: (e) => (S.setupOpen = e.target.open) },
+    h("summary", {}, h("strong", {}, fresh ? "Welcome to JobPilot" : "Finish setting up"), h("span", { class: "small muted" }, ` · ${done} of ${steps.length} done`)),
+    fresh ? h("p", { class: "small muted", style: { margin: "6px 0" } }, "A few minutes of setup, then JobPilot finds jobs that fit your resume, tailors it per job, and fills applications. Start with step 1.") : null,
+    h(
+      "ol",
+      { class: "setup-steps" },
+      steps.map((x) =>
+        h(
+          "li",
+          { class: x.done ? "done" : x === next ? "next" : "" },
+          h("div", { class: "row" }, h("span", { class: "step-check" }, x.done ? "✓" : ""), h("strong", { class: "small" }, x.title), h("span", { class: "spacer" }), !x.done && x.skip ? h("button", { class: "btn ghost small", onclick: () => (x.skip(), invalidate()) }, "Skip") : null, !x.done ? h("button", { class: `btn small${x === next ? " primary" : " ghost"}`, onclick: () => goToStep(x) }, "Go") : null),
+          x === next ? h("div", { class: "small muted", style: { margin: "2px 0 0 26px" } }, x.what) : null
+        )
+      )
+    ),
+    h("div", { class: "row end" }, h("button", { class: "btn ghost small", onclick: () => ((S.settings.onboarding = { ...(S.settings.onboarding || {}), hidden: true }), saveSettings(), invalidate()) }, "Hide this guide"))
+  );
+}
+
 // --------------------------------------------- what jobs to look for
 
 // One Claude call: your resume -> the kinds of roles that fit (fit.js).
@@ -911,7 +1063,7 @@ async function buildTargetFromResume({ quiet = false } = {}) {
   if (!aiReady() || !hasContent(S.base)) return;
   const t = await AI.buildTarget(S.settings, { resumeText: resumeToText(S.base), profile: S.profile });
   S.settings.target = { ...Fit.DEFAULT_TARGET, ...t, builtAt: Date.now() };
-  await store.set("settings", S.settings);
+  await persist("settings", S.settings);
   if (!quiet) toast("Updated what jobs to look for from your resume.");
   if (S.activeTab === "jobs") renderJobs();
   if (S.activeTab === "settings") renderSettings();
@@ -919,12 +1071,7 @@ async function buildTargetFromResume({ quiet = false } = {}) {
 
 // ------------------------------------------------------- saved jobs
 
-let savingSaved = false;
-const saveSaved = debounce(async () => {
-  savingSaved = true;
-  await store.set("saved", S.saved);
-  savingSaved = false;
-}, 300);
+const saveSaved = debounce(() => persist("saved", S.saved), 300);
 
 function toggleSaved(job) {
   if (S.saved[job.key]) delete S.saved[job.key];
@@ -985,7 +1132,7 @@ function savedList() {
                 class: "btn ghost small",
                 onclick: () => {
                   S.applied[j.key] = { company: j.company, title: j.title, url: j.url, date: Date.now() };
-                  store.set("applied", S.applied);
+                  persist("applied", S.applied);
                   renderJobs();
                 },
               },
@@ -1001,7 +1148,7 @@ function savedList() {
 // ---------------------------------------------------- can you apply?
 
 const ELIG_TTL = 7 * 86400000;
-const saveElig = debounce(() => store.set("eligCache", S.eligStore), 1500);
+const saveElig = debounce(() => persist("eligCache", S.eligStore), 1500);
 const rerenderJobsSoon = debounce(() => S.activeTab === "jobs" && renderJobs(), 600);
 const eligQueue = [];
 const eligQueued = new Set();
@@ -1108,7 +1255,7 @@ async function refreshJobList() {
 const STATUS_PILL = { queued: "", running: "", applied: "good", review: "info", "needs-you": "warn", manual: "", failed: "bad", ineligible: "bad", notfit: "", stale: "" };
 const STATUS_LABEL = { queued: "Queued", running: "Working", applied: "Applied", review: "Review & submit", "needs-you": "Needs you", manual: "Apply manually", failed: "Failed", ineligible: "Not eligible", notfit: "Not a fit", stale: "Too old" };
 // Saved right away: debounce timers get throttled while the run tab is hidden.
-const saveQueue = () => store.set("autopilotQueue", S.queue);
+const saveQueue = () => persist("autopilotQueue", S.queue);
 
 function autopilotCard() {
   const ap = S.settings.autopilot;
@@ -1149,7 +1296,7 @@ function autopilotCard() {
         "div",
         { class: "row", style: { marginTop: "6px" } },
         h("span", { class: "pill info" }, spinner(), " running in the JobPilot tab"),
-        h("button", { class: "btn ghost small", onclick: () => (store.set("autopilotStop", true), toast("Stopping after the current jobs…")) }, "Stop")
+        h("button", { class: "btn ghost small", onclick: () => (persist("autopilotStop", true), toast("Stopping after the current jobs…")) }, "Stop")
       )
     );
   }
@@ -1189,7 +1336,7 @@ async function tryAgain(items) {
     S.queue = S.queue.filter((x) => x !== it);
     S.queue.push(it);
   }
-  await store.set("autopilotQueue", S.queue); // saved before a run tab loads it
+  await persist("autopilotQueue", S.queue); // saved before a run tab loads it
   renderJobs();
   if (!S.autopilotRunning) await startAutopilot(0);
 }
@@ -1219,7 +1366,7 @@ function queueRow(it) {
     it.status = "applied";
     it.note = "Marked applied by you";
     S.applied[it.job.key] = { company: it.job.company, title: it.job.title, url: it.job.url, date: Date.now() };
-    store.set("applied", S.applied);
+    persist("applied", S.applied);
     saveQueue();
     renderJobs();
   };
@@ -1330,7 +1477,7 @@ async function startAutopilot(n) {
     tailoredFor: (job) => S.tailored[job.key],
     saveTailored: async (job, entry) => {
       S.tailored[job.key] = entry;
-      await store.set("tailored", S.tailored);
+      await persist("tailored", S.tailored);
     },
     resumeFileFor: async (job, t) => {
       const name = R.fileNameFor(S.settings.fileNamePattern, t?.resume || S.base, S.profile, t?.company || job.company, t?.role || job.title);
@@ -1375,7 +1522,7 @@ async function startAutopilot(n) {
       onUpdate: (item) => {
         if (item.status === "applied" && !S.applied[item.job.key]) {
           S.applied[item.job.key] = { company: item.job.company, title: item.job.title, url: item.job.url, date: Date.now(), auto: true };
-          store.set("applied", S.applied);
+          persist("applied", S.applied);
         }
         saveQueue();
         rerender();
@@ -1383,7 +1530,7 @@ async function startAutopilot(n) {
     });
   } finally {
     S.autopilotRunning = false;
-    await store.set("autopilotQueue", S.queue);
+    await persist("autopilotQueue", S.queue);
     renderJobs();
     const c = S.queue.reduce((m, i) => ((m[i.status] = (m[i.status] || 0) + 1), m), {});
     const summary = `${c.applied || 0} submitted, ${c.review || 0} to review, ${c["needs-you"] || 0} need you.`;
@@ -1435,7 +1582,7 @@ async function handleUpload(file) {
   if (file.size > 20 * 1024 * 1024) return toast("That PDF is over 20 MB.", true);
   const base64 = await fileToBase64(file);
   S.resumePdf = { name: file.name, base64 };
-  await store.set("resumePdf", S.resumePdf);
+  await persist("resumePdf", S.resumePdf);
   if (!aiReady()) {
     toast("Saved your PDF. Connect Claude in Settings to turn it into editable boxes.");
     renderResumeTab();
@@ -1451,10 +1598,10 @@ async function parseUploaded() {
       const parsed = await AI.parseResume(S.settings, S.resumePdf.base64);
       S.base = R.fromParsed(parsed);
       S.editing = "base";
-      await store.set("resume", S.base);
+      await persist("resume", S.base);
       if (parsed.profile) {
         S.profile = R.mergeProfile(S.profile, parsed.profile);
-        await store.set("profile", S.profile);
+        await persist("profile", S.profile);
       }
       toast("Resume parsed. Check the boxes below.");
       buildTargetFromResume({ quiet: true }).catch(() => {});
@@ -1490,7 +1637,7 @@ function renderResumeTab() {
       : [h("strong", {}, S.resumePdf ? "Upload a new resume PDF" : "Upload your resume (PDF)"), h("div", { class: "small muted" }, "Click or drop a file here. Claude turns it into editable boxes.")],
     fileInput
   );
-  const uploadCard = h("div", { class: "card" }, drop);
+  const uploadCard = h("div", { class: "card", id: "card-upload" }, drop);
   if (S.resumePdf) {
     uploadCard.append(
       h(
@@ -1523,6 +1670,8 @@ function renderResumeTab() {
       )
     );
   }
+  const guide = setupGuide();
+  if (guide) parts.push(guide);
   parts.push(uploadCard);
 
   if (!hasContent(S.base)) {
@@ -1658,7 +1807,7 @@ function renderResumeTab() {
                     if (!data.basics || !Array.isArray(data.sections)) throw new Error("Not a JobPilot resume file.");
                     S.base = data;
                     S.editing = "base";
-                    await store.set("resume", S.base);
+                    await persist("resume", S.base);
                     renderResumeTab();
                     toast("Imported.");
                   } catch (err) {
@@ -1863,7 +2012,7 @@ function sectionCard(r, s, si) {
 
 // ------------------------------------------------------- cover letter
 
-const saveCover = debounce(() => store.set("coverLetter", S.cover), 400);
+const saveCover = debounce(() => persist("coverLetter", S.cover), 400);
 
 function coverCard() {
   const c = S.cover;
@@ -1942,7 +2091,7 @@ function coverCard() {
 
   return h(
     "details",
-    { class: "card", open: S.coverOpen ?? false, ontoggle: (e) => (S.coverOpen = e.target.open) },
+    { class: "card", id: "card-cover", open: S.coverOpen ?? false, ontoggle: (e) => (S.coverOpen = e.target.open) },
     h("summary", {}, h("strong", {}, "Cover letter"), h("span", { class: "small muted" }, " (optional)")),
     h(
       "p",
@@ -2022,14 +2171,14 @@ function feedbackBox({ key, button, placeholder, run, rerender, primary = false 
 
 // ------------------------------------------------------- answer bank
 
-const saveBank = debounce(() => store.set("answerBank", S.bank), 400);
+const saveBank = debounce(() => persist("answerBank", S.bank), 400);
 
 function bankCard() {
   const written = S.bank.filter((b) => b.text.trim()).length;
   const rerender = () => (saveBank(), renderSettings());
   return h(
     "details",
-    { class: "card", open: S.bankOpen ?? false, ontoggle: (e) => (S.bankOpen = e.target.open) },
+    { class: "card", id: "card-bank", open: S.bankOpen ?? false, ontoggle: (e) => (S.bankOpen = e.target.open) },
     h("summary", {}, h("strong", {}, "Your answers"), h("span", { class: "small muted" }, ` (${written} written)`)),
     h(
       "p",
@@ -2083,10 +2232,10 @@ function renderSettings() {
         e.target.disabled = true;
         status.replaceChildren(spinner(), usingCC ? " Asking Claude Code… (can take ~10s)" : " Testing…");
         try {
-          await store.set("settings", st);
+          await persist("settings", st);
           const r = await AI.testConnection(st);
           st.aiVerified = true;
-          await store.set("settings", st);
+          await persist("settings", st);
           resetLatexStatus();
           status.replaceChildren(h("span", { class: "pill good" }, usingCC ? `Connected ✓ ${r.split(" · ").slice(1).join(" · ")}` : "Connected ✓"));
         } catch (err) {
@@ -2201,7 +2350,7 @@ function renderSettings() {
     ];
   }
 
-  const aiCard = h("div", { class: "card" }, h("h3", {}, "Connect Claude"), providerPick, body, h("div", { class: "row" }, testButton, status));
+  const aiCard = h("div", { class: "card", id: "card-ai" }, h("h3", {}, "Connect Claude"), providerPick, body, h("div", { class: "row" }, testButton, status));
 
   const pf = (key, label, placeholder = "") =>
     h("label", { class: "field" }, h("span", {}, label), h("input", { type: "text", value: p[key] || "", placeholder, oninput: (e) => ((p[key] = e.target.value), saveProfile()) }));
@@ -2220,7 +2369,7 @@ function renderSettings() {
 
   const profileCard = h(
     "div",
-    { class: "card" },
+    { class: "card", id: "card-profile" },
     h("h3", {}, "Application profile"),
     h("p", { class: "small muted" }, "Used to autofill forms. Filled in automatically when your resume is parsed, so check it over."),
     h("div", { class: "grid2" }, pf("firstName", "First name"), pf("lastName", "Last name")),
@@ -2398,7 +2547,7 @@ function renderSettings() {
             try {
               const items = await Sources.fetchSource({ input });
               st.sources.push({ id: `src-${Date.now()}`, label: input.replace(/^https?:\/\/(www\.)?github\.com\//, ""), input, enabled: true });
-              await store.set("settings", st);
+              await persist("settings", st);
               toast(`Added: ${items.length} open jobs found.`);
               renderSettings();
               refreshJobList();
@@ -2491,7 +2640,7 @@ function renderSettings() {
             e.target.disabled = true;
             updateStatus.replaceChildren(spinner(), " Checking…");
             try {
-              await store.set("settings", st);
+              await persist("settings", st);
               const r = await Update.checkForUpdate(st);
               updateStatus.replaceChildren(h("span", { class: `pill ${r.available ? "warn" : "good"}` }, r.detail));
               renderUpdateBanner(r);
@@ -2548,7 +2697,7 @@ function renderSettings() {
     });
   const targetCard = h(
     "div",
-    { class: "card" },
+    { class: "card", id: "card-target" },
     h("h3", {}, "What jobs to look for"),
     h("p", { class: "small muted" }, tg.summary || "Claude reads your resume and decides which roles fit: the fields, the degree level, and what to rule out. Every listing is then scored against this without AI."),
     h(
@@ -2586,7 +2735,7 @@ function renderSettings() {
     )
   );
 
-  el.replaceChildren(aiCard, profileCard, targetCard, answersCard, bankCard(), instructionsCard, autopilotCard, sourceCard, filesCard, updatesCard, dataCard);
+  el.replaceChildren(...[setupGuide()].filter(Boolean), aiCard, profileCard, targetCard, answersCard, bankCard(), instructionsCard, autopilotCard, sourceCard, filesCard, updatesCard, dataCard);
 }
 
 function hr() {
@@ -2601,7 +2750,7 @@ function renderUpdateBanner(status) {
   const banner = h(
     "div",
     { id: "update-banner", class: "card", style: { margin: "8px 12px 0", borderColor: "var(--accent)" } },
-    h("div", { class: "small", style: { fontWeight: 600 } }, `JobPilot update available · ${status.detail}`),
+    h("div", { class: "small", style: { fontWeight: 600 } }, status.restartOnly ? `JobPilot was updated · ${status.detail}` : `JobPilot update available · ${status.detail}`),
     status.canAutoUpdate
       ? h(
           "div",
@@ -2622,7 +2771,7 @@ function renderUpdateBanner(status) {
                 }
               },
             },
-            "Update now"
+            status.restartOnly ? "Restart now" : "Update now"
           ),
           h("span", { class: "small muted" }, "The panel will close; reopen it after.")
         )
@@ -2638,6 +2787,11 @@ function renderUpdateBanner(status) {
   );
   document.querySelector("main").before(banner);
 }
+
+renderApply = keepFocus(renderApply);
+renderJobs = keepFocus(renderJobs);
+renderResumeTab = keepFocus(renderResumeTab);
+renderSettings = keepFocus(renderSettings);
 
 // ------------------------------------------------------------------ init
 
@@ -2692,7 +2846,8 @@ async function init() {
   if (settings.autoUpdate !== "off") {
     const last = await Update.lastStatus();
     renderUpdateBanner(last);
-    if (Update.isStale(last)) Update.checkForUpdate(settings).then(renderUpdateBanner).catch(() => {});
+    // New files on disk (the folder Chrome loads from changed) or a stale check: look now.
+    if (Update.restartPending(await Update.diskVersion()) || Update.isStale(last)) Update.checkForUpdate(settings).then(renderUpdateBanner).catch(() => {});
   }
 
   // No job target yet but a resume is there: read it once in the background.
@@ -2703,22 +2858,43 @@ async function init() {
     document.title = "JobPilot Autopilot";
     S.activeTab = "jobs";
     switchTab("jobs");
-    await store.set("autopilotStop", false);
+    await persist("autopilotStop", false);
     const jobs = await jobsPromise;
     if (!S.jobsCache.fetchedAt) S.jobsCache = withKeys(jobs);
     startAutopilot(Number(RUN_PARAM));
   }
 
   // Follow a run in the other JobPilot page (panel <-> pinned tab).
+  // Changes from other JobPilot pages (pinned Autopilot tab, background
+  // worker, another panel) show up here right away.
+  const SYNC = {
+    settings: (v) => (S.settings = { ...S.settings, ...v }),
+    profile: (v) => (S.profile = { ...S.profile, ...v }),
+    resume: (v) => (S.base = v),
+    tailored: (v) => (S.tailored = v || {}),
+    applied: (v) => (S.applied = v || {}),
+    saved: (v) => (S.saved = v || {}),
+    coverLetter: (v) => (S.cover = { ...C.DEFAULT_COVER, ...(v || {}) }),
+    answerBank: (v) => (S.bank = v || []),
+    autopilotQueue: (v) => !S.autopilotRunning && (S.queue = v || []),
+    jobsCache: (v) => v && (S.jobsCache = withKeys(v)),
+    updateStatus: (v) => renderUpdateBanner(v),
+  };
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local") return;
     if (changes.autopilotStop?.newValue && S.autopilotRunning) S.stopAutopilot = true;
-    if (changes.autopilotQueue && !S.autopilotRunning) {
-      S.queue = changes.autopilotQueue.newValue || [];
-      if (S.activeTab === "jobs") renderJobs();
+    let changed = false;
+    for (const [key, { newValue }] of Object.entries(changes)) {
+      if (!SYNC[key]) continue;
+      let json;
+      try {
+        json = JSON.stringify(newValue);
+      } catch {}
+      if (json !== undefined && json === lastWritten.get(key)) continue; // our own write
+      SYNC[key](newValue);
+      changed = true;
     }
-    if (changes.applied && !S.autopilotRunning) S.applied = changes.applied.newValue || {};
-    if (changes.saved && !savingSaved) S.saved = changes.saved.newValue || {};
+    if (changed) invalidate();
   });
 }
 

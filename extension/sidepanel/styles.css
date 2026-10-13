@@ -240,3 +240,15 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 10px 0; }
 /* Saved-for-later star */
 .btn.starred { color: #d4a017; }
 .job > .btn.small { padding: 2px 6px; font-size: 15px; line-height: 1; align-self: center; }
+/* Setup guide */
+.setup { border-color: var(--accent); }
+.setup-steps { list-style: none; padding: 0; margin: 8px 0 4px; }
+.setup-steps li { padding: 6px 0; border-bottom: 1px solid var(--border); }
+.setup-steps li:last-child { border-bottom: 0; }
+.setup-steps li.done { opacity: 0.6; }
+.step-check { display: inline-flex; width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid var(--border); align-items: center; justify-content: center; font-size: 11px; margin-right: 8px; flex: none; }
+.setup-steps li.done .step-check { background: var(--good); border-color: var(--good); color: #fff; }
+.setup-steps li.next .step-check { border-color: var(--accent); }
+/* "Go" from the setup guide: briefly highlight the card */
+@keyframes spotlight { 0% { box-shadow: 0 0 0 0 var(--accent); } 30% { box-shadow: 0 0 0 4px var(--accent); } 100% { box-shadow: 0 0 0 0 transparent; } }
+.spotlight { animation: spotlight 1.6s ease-out 2; }

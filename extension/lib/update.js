@@ -42,8 +42,32 @@ async function remoteVersion(settings) {
 }
 
 // -> { available, canAutoUpdate, detail, checkedAt }
+// The version in the folder Chrome loads JobPilot from. When that folder
+// is the git clone that changed (git pull, or edits made right there), the
+// files are already new but Chrome keeps running the old code until the
+// extension reloads: that's an update that only needs a restart.
+export async function diskVersion() {
+  try {
+    const res = await fetch(`${chrome.runtime.getURL("manifest.json")}?t=${Date.now()}`, { cache: "no-store" });
+    return (await res.json()).version || null;
+  } catch {
+    return null;
+  }
+}
+
+export function restartPending(disk) {
+  return !!disk && newer(disk, chrome.runtime.getManifest().version);
+}
+
 export async function checkForUpdate(settings) {
   const current = chrome.runtime.getManifest().version;
+  const disk = await diskVersion();
+  if (restartPending(disk)) {
+    const result = { available: true, canAutoUpdate: true, restartOnly: true, detail: `Version ${disk} is downloaded (running ${current}); restart to use it`, checkedAt: Date.now() };
+    await set("updateStatus", result);
+    showBadge(true);
+    return result;
+  }
   let result;
   try {
     const r = await bridge({ type: "update-check", branch: settings.updateBranch });
@@ -75,6 +99,13 @@ export function isStale(status) {
 
 // Pulls the latest code and reloads the extension so it takes effect.
 export async function applyUpdate(settings) {
+  // Already on disk: just restart.
+  if (restartPending(await diskVersion())) {
+    await set("updateStatus", null);
+    showBadge(false);
+    chrome.runtime.reload();
+    return { ok: true, pulled: false };
+  }
   const r = await bridge({ type: "update", branch: settings.updateBranch });
   await set("updateStatus", null);
   showBadge(false);

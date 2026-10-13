@@ -32,6 +32,8 @@ It also works in Brave, Edge and Arc (all Chromium-based).
 
 ## Set up
 
+The first time you open the panel, a **setup guide** walks you through these steps (connect Claude, upload your resume, check your profile, confirm what jobs to look for, optional answers, first application). **Go** on a step jumps to the right place and highlights it; the guide stays at the top of every tab until you're done or hide it.
+
 ### 1. Connect Claude (pick one)
 
 **Option A: your Claude Pro/Max subscription, via Claude Code (no API key)**
@@ -72,6 +74,8 @@ JobPilot checks this repo for new commits every few hours and puts a **↑** bad
 - **Repo / branch**: defaults to `v1m08/Internships` on `main`. If you fork JobPilot, point this at your fork.
 
 One-click updates need a `git clone` and the Claude Code bridge installed from inside it (`node bridge/install.js`). The bridge runs `git pull --ff-only` in that folder, refreshes its own copy, and the extension reloads. Without the bridge, or with a ZIP download, JobPilot just tells you a newer version is out: run `git pull` (or re-download), then click reload on JobPilot in `chrome://extensions`.
+
+If the folder Chrome loads JobPilot from already has newer files (you ran `git pull`, or edited the clone), JobPilot notices within a minute and restarts into them by itself when the panel and Autopilot aren't open; otherwise it shows *Restart now*.
 
 Updates never touch your data. Your resume, profile and settings live in the browser, not in the repo folder.
 
